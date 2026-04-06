@@ -64,17 +64,18 @@ type Message struct {
 	IsDeleted      bool          `json:"isDeleted" bson:"isDeleted"`
 	// Keep 表示“长期保留（不受 message TTL 自动过期影响）”。默认 false。
 	// 注意：该能力是否允许由 API 进程通过环境变量控制。
-	Keep bool `json:"keep,omitempty" bson:"keep,omitempty"`
+	// 重要：bson 侧不要用 omitempty。否则 keep=false 会被省略写入 Mongo，TTL partial index（keep=false）会匹配不到，导致消息不自动过期。
+	Keep bool `json:"keep,omitempty" bson:"keep"`
 	// IngestStream/IngestSeq 用于幂等去重与排错（来自 JetStream 元数据）。不对外暴露。
-	IngestStream string `json:"-" bson:"ingestStream,omitempty"`
-	IngestSeq    int64  `json:"-" bson:"ingestSeq,omitempty"`
-	Flagged        bool          `json:"flagged" bson:"flagged"`
-	Retention      bool          `json:"retention" bson:"retention"`
-	RetentionDate  time.Time     `json:"retentionDate" bson:"retentionDate"`
-	DownloadURL    string        `json:"downloadUrl" bson:"-"`
-	RawMessage     []byte        `json:"-" bson:"rawMessage,omitempty"`
-	CreatedAt      time.Time     `json:"createdAt" bson:"createdAt"`
-	UpdatedAt      time.Time     `json:"updatedAt" bson:"updatedAt"`
+	IngestStream  string    `json:"-" bson:"ingestStream,omitempty"`
+	IngestSeq     int64     `json:"-" bson:"ingestSeq,omitempty"`
+	Flagged       bool      `json:"flagged" bson:"flagged"`
+	Retention     bool      `json:"retention" bson:"retention"`
+	RetentionDate time.Time `json:"retentionDate" bson:"retentionDate"`
+	DownloadURL   string    `json:"downloadUrl" bson:"-"`
+	RawMessage    []byte    `json:"-" bson:"rawMessage,omitempty"`
+	CreatedAt     time.Time `json:"createdAt" bson:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt" bson:"updatedAt"`
 }
 
 // IncomingEmail is the payload sent via NATS from SMTP to workers.

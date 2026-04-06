@@ -10,6 +10,8 @@
 domains:
   - domain: "example.com"
     isActive: true
+    # 私有域名（isPrivate=true）不会被 wildcard（"*"）API key 隐式放开，必须显式在 apiKeys[].domains 中列出该域名。
+    # 典型用途：内部/付费域名不希望被“全域 key”或误配置暴露。
     isPrivate: false
     ips: []               # listen on all interfaces
 #  - domain: "example.org"
@@ -35,7 +37,10 @@ domains:
 apiKeys:
   - key: "sk_change_me_to_a_random_key"
     name: "Admin"
-    domains: ["*"]        # access to all domains
+    # access to all *public* domains.
+    # If you have private domains (isPrivate=true), you must still explicitly list them here, e.g.:
+    # domains: ["*", "vip.example.com"]
+    domains: ["*"]
     rpmLimit: 0           # unlimited (uses global limit only)
 #  - key: "sk_partner_key_here"
 #    name: "Partner"
@@ -91,6 +96,14 @@ server:
     maxRecipients: 50
     readTimeout: 60s
     writeTimeout: 60s
+    # STARTTLS（RFC 3207）。启用后会在 EHLO 中广播 STARTTLS，并允许客户端升级到 TLS。
+    # 证书路径允许写相对路径（相对于 config.yaml 所在目录），但生产环境更推荐绝对路径。
+    tls:
+      enabled: false
+      certFile: ""     # PEM 证书路径（enabled=true 时必填）
+      keyFile: ""      # PEM 私钥路径（enabled=true 时必填）
+      requireTLS: false # true 时强制客户端在 MAIL/RCPT/DATA 前先 STARTTLS（否则 530）；默认 false
+      minVersion: "1.2" # 可选：1.2/1.3；为空表示默认 1.2
     # Debug HTTP server（健康检查/指标/pprof）。默认关闭；建议仅绑定 127.0.0.1。
     debug:
       enabled: false

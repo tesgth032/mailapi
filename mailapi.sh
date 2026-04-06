@@ -524,9 +524,16 @@ Environment (config, non-interactive):
   MAILAPI_SERVICE_USER         systemd: set User= for services (optional; beware smtp :25)
   MAILAPI_SERVICE_GROUP        systemd: set Group= for services (default: same as user)
   MAILAPI_DOMAINS              Comma-separated domains (e.g. a.com,b.com)
+  MAILAPI_PRIVATE_DOMAINS      Comma-separated private domains (optional; wildcard API keys will NOT implicitly include them)
   MAILAPI_API_PORT             API port (default: 8080)
   MAILAPI_SMTP_PORT            SMTP port (default: 25)
   MAILAPI_SMTP_DOMAIN          SMTP EHLO domain (default: mail.<first domain>)
+  MAILAPI_SMTP_TLS_ENABLED      y/yes/1 to enable SMTP STARTTLS (RFC 3207)
+  MAILAPI_SMTP_TLS_CERT_FILE    SMTP TLS cert file path (PEM; relative paths are relative to config.yaml)
+  MAILAPI_SMTP_TLS_KEY_FILE     SMTP TLS key file path (PEM)
+  MAILAPI_SMTP_TLS_REQUIRE_TLS  y/yes/1 to require STARTTLS before MAIL/RCPT/DATA (returns 530 otherwise)
+  MAILAPI_SMTP_TLS_MIN_VERSION  TLS min version (1.2|1.3; default: 1.2)
+  MAILAPI_SMTP_TLS_SELF_SIGNED  y/yes/1 to auto-generate self-signed cert/key when missing (requires openssl; default: y when TLS enabled)
   MAILAPI_CFWORKER_UPSTREAM     cfworker upstream URL (optional)
   MAILAPI_ENABLE_DIALECTS       y/yes/1 to enable dialect routing
   MAILAPI_BASE_HOST             baseHost when dialects enabled (default: api.<first domain>)
@@ -855,6 +862,27 @@ do_config() {
         warn "No domains entered, using example.com"
     fi
 
+    # 私有域名（可选）：isPrivate=true 的域名不会被 wildcard（"*"）API key 隐式放开，必须显式列在 apiKeys[].domains 中。
+    local private_domains_csv_default="${MAILAPI_PRIVATE_DOMAINS:-}"
+    local private_domains_csv="$private_domains_csv_default"
+    if ! is_noninteractive; then
+        private_domains_csv="$(read_default "Private domains (comma-separated, empty=none) [${private_domains_csv_default}]: " "$private_domains_csv_default")"
+    fi
+    private_domains_csv="$(trim "$private_domains_csv")"
+
+    # 归一化成 ",a.com,b.com," 形式，便于精确 contains 判断（避免部分匹配）。
+    local private_domains_norm=","
+    if [[ -n "$private_domains_csv" ]]; then
+        local _pd
+        local _priv_arr=()
+        IFS=',' read -r -a _priv_arr <<<"$private_domains_csv"
+        for _pd in "${_priv_arr[@]}"; do
+            _pd="$(lower "$(trim "$_pd")")"
+            [[ -z "$_pd" ]] && continue
+            private_domains_norm+="${_pd},"
+        done
+    fi
+
     # API key
     local admin_key
     admin_key=$(generate_api_key)
@@ -878,6 +906,87 @@ do_config() {
 
     validate_port "$api_port" "API port"
     validate_port "$smtp_port" "SMTP port"
+
+    # SMTP STARTTLS（可选）
+    local smtp_tls_enabled="${MAILAPI_SMTP_TLS_ENABLED:-}"
+    if [[ -z "$smtp_tls_enabled" ]]; then
+        if is_noninteractive; then
+            smtp_tls_enabled="n"
+        else
+            read -rp "Enable SMTP STARTTLS (RFC 3207)? [y/N] " smtp_tls_enabled
+        fi
+    fi
+    smtp_tls_enabled="$(normalize_yes "$smtp_tls_enabled")"
+
+    local smtp_tls_certFile="" smtp_tls_keyFile="" smtp_tls_require="n" smtp_tls_minVersion="1.2"
+    if [[ "$smtp_tls_enabled" == "y" ]]; then
+        local smtp_tls_cert_default="${MAILAPI_SMTP_TLS_CERT_FILE:-certs/smtp.crt}"
+        local smtp_tls_key_default="${MAILAPI_SMTP_TLS_KEY_FILE:-certs/smtp.key}"
+        local smtp_tls_require_default="${MAILAPI_SMTP_TLS_REQUIRE_TLS:-n}"
+        local smtp_tls_min_default="${MAILAPI_SMTP_TLS_MIN_VERSION:-1.2}"
+
+        smtp_tls_certFile="$(read_default "SMTP TLS cert file (PEM) [${smtp_tls_cert_default}]: " "$smtp_tls_cert_default")"
+        smtp_tls_keyFile="$(read_default "SMTP TLS key file (PEM) [${smtp_tls_key_default}]: " "$smtp_tls_key_default")"
+        smtp_tls_require="$(read_default "Require STARTTLS before MAIL/RCPT/DATA? [${smtp_tls_require_default}]: " "$smtp_tls_require_default")"
+        smtp_tls_minVersion="$(read_default "SMTP TLS min version (1.2|1.3) [${smtp_tls_min_default}]: " "$smtp_tls_min_default")"
+
+        smtp_tls_certFile="$(trim "$smtp_tls_certFile")"
+        smtp_tls_keyFile="$(trim "$smtp_tls_keyFile")"
+        smtp_tls_minVersion="$(trim "$smtp_tls_minVersion")"
+        smtp_tls_require="$(normalize_yes "$smtp_tls_require")"
+
+        if [[ -z "$smtp_tls_certFile" || -z "$smtp_tls_keyFile" ]]; then
+            error "SMTP TLS is enabled but cert/key file is empty. Set MAILAPI_SMTP_TLS_CERT_FILE / MAILAPI_SMTP_TLS_KEY_FILE (or provide input)."
+            return 1
+        fi
+
+        if [[ "$smtp_tls_minVersion" != "1.3" ]]; then
+            smtp_tls_minVersion="1.2"
+        fi
+
+        # 若证书文件不存在：尝试按需生成自签名证书，保证一键安装可用（仅建议用于开发/测试）。
+        # 注意：相对路径按 config.yaml 所在目录解析（与服务端一致）。
+        local smtp_tls_self_signed="${MAILAPI_SMTP_TLS_SELF_SIGNED:-}"
+        if [[ -z "$smtp_tls_self_signed" ]]; then
+            if is_noninteractive; then
+                smtp_tls_self_signed="y"
+            else
+                read -rp "Generate self-signed SMTP TLS cert/key if missing? [Y/n] " smtp_tls_self_signed
+                [[ -z "$smtp_tls_self_signed" ]] && smtp_tls_self_signed="y"
+            fi
+        fi
+        smtp_tls_self_signed="$(normalize_yes "$smtp_tls_self_signed")"
+
+        local cfg_dir_abs
+        cfg_dir_abs="$(cd "$(dirname "$CONFIG_FILE")" && pwd)"
+        local cert_abs="$smtp_tls_certFile"
+        local key_abs="$smtp_tls_keyFile"
+        if [[ "$cert_abs" != /* ]]; then cert_abs="${cfg_dir_abs%/}/${cert_abs}"; fi
+        if [[ "$key_abs" != /* ]]; then key_abs="${cfg_dir_abs%/}/${key_abs}"; fi
+
+        if [[ ! -f "$cert_abs" || ! -f "$key_abs" ]]; then
+            if [[ "$smtp_tls_self_signed" == "y" ]]; then
+                if ! have_cmd openssl; then
+                    error "SMTP TLS cert/key not found and openssl is not available to generate a self-signed certificate."
+                    error "Missing: $cert_abs / $key_abs"
+                    return 1
+                fi
+                mkdir -p "$(dirname "$cert_abs")" "$(dirname "$key_abs")"
+                info "Generating self-signed SMTP TLS cert/key:"
+                info "  cert: $cert_abs"
+                info "  key:  $key_abs"
+                openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+                    -keyout "$key_abs" -out "$cert_abs" -subj "/CN=${smtp_domain}"
+                chmod 600 "$key_abs" 2>/dev/null || true
+            else
+                error "SMTP TLS is enabled but cert/key file not found:"
+                error "  cert: $cert_abs"
+                error "  key:  $key_abs"
+                error "Provide existing files or set MAILAPI_SMTP_TLS_SELF_SIGNED=1 to auto-generate."
+                return 1
+            fi
+        fi
+    fi
 
     # MinIO 凭证（会写入 config.yaml，同时写入 infra.env 供 docker compose 使用，确保两者一致）。
     local minio_user_default="$MINIO_ROOT_USER"
@@ -965,6 +1074,13 @@ do_config() {
         enabled_dialects_yaml+="]"
     fi
 
+    local smtp_tls_enabled_bool="false"
+    local smtp_tls_require_bool="false"
+    if [[ "$smtp_tls_enabled" == "y" ]]; then
+        smtp_tls_enabled_bool="true"
+        [[ "$smtp_tls_require" == "y" ]] && smtp_tls_require_bool="true"
+    fi
+
     # Write config
     if [[ -f "$CONFIG_FILE" ]]; then
         backup_file "$CONFIG_FILE" || true
@@ -972,10 +1088,16 @@ do_config() {
     {
         echo "domains:"
         for d in "${domains[@]}"; do
+            local d_lc is_private
+            d_lc="$(lower "$(trim "$d")")"
+            is_private="false"
+            if [[ "$private_domains_norm" == *",$d_lc,"* ]]; then
+                is_private="true"
+            fi
             cat <<EOF
   - domain: "$d"
     isActive: true
-    isPrivate: false
+    isPrivate: ${is_private}
     ips: []
 EOF
         done
@@ -1041,6 +1163,12 @@ EOF
     maxRecipients: 50
     readTimeout: 60s
     writeTimeout: 60s
+    tls:
+      enabled: ${smtp_tls_enabled_bool}
+      certFile: "${smtp_tls_certFile}"
+      keyFile: "${smtp_tls_keyFile}"
+      requireTLS: ${smtp_tls_require_bool}
+      minVersion: "${smtp_tls_minVersion}"
     # Debug HTTP server（健康检查/指标/pprof）。默认关闭；建议仅绑定 127.0.0.1。
     debug:
       enabled: false
@@ -2275,7 +2403,7 @@ do_doctor() {
         # Always probe API business endpoint (should exist even when debug server is disabled).
         local tmp2 code2
         tmp2="$(mktemp_compat)"
-        if code2="$(retry 5 200 -- curl_request "GET" "${api_base_url%/}/domains" "$tmp2" "" "$hosthdr")"; then
+        if code2="$(retry 5 200 -- curl_request "GET" "${api_base_url%/}/domains" "$tmp2" "$key" "$hosthdr")"; then
             if [[ "$code2" == "200" ]]; then
                 echo -e "  GET /domains: ${GREEN}200${NC}"
             else
@@ -2717,6 +2845,56 @@ do_smoke() {
         return 1
     fi
     info "GET /messages OK"
+
+    # seen filter
+    tmp="$(mktemp_compat)"
+    if ! code="$(retry 5 200 -- curl_request "GET" "${base_url%/}/messages?seen=true" "$tmp" "$token" "$hosthdr")"; then
+        body="$(cat "$tmp" 2>/dev/null || true)"
+        rm -f "$tmp" 2>/dev/null || true
+        error "GET /messages?seen=true failed (request error): $body"
+        return 1
+    fi
+    body="$(cat "$tmp" 2>/dev/null || true)"
+    rm -f "$tmp" 2>/dev/null || true
+    if [[ "$code" != "200" ]]; then
+        error "GET /messages?seen=true failed (HTTP $code): $body"
+        return 1
+    fi
+    info "GET /messages?seen=true OK"
+
+    # bulk update flags (all=true)
+    local bulk_body
+    bulk_body='{"all":true,"seen":true}'
+    tmp="$(mktemp_compat)"
+    if ! code="$(retry 5 200 -- curl_request_json "PATCH" "${base_url%/}/messages" "$bulk_body" "$tmp" "$token" "$hosthdr")"; then
+        body="$(cat "$tmp" 2>/dev/null || true)"
+        rm -f "$tmp" 2>/dev/null || true
+        error "PATCH /messages (bulk) failed (request error): $body"
+        return 1
+    fi
+    body="$(cat "$tmp" 2>/dev/null || true)"
+    rm -f "$tmp" 2>/dev/null || true
+    if [[ "$code" != "200" ]]; then
+        error "PATCH /messages (bulk) failed (HTTP $code): $body"
+        return 1
+    fi
+    info "PATCH /messages (bulk) OK"
+
+    # bulk delete by account (may delete 0; just ensure endpoint works)
+    tmp="$(mktemp_compat)"
+    if ! code="$(retry 5 200 -- curl_request "DELETE" "${base_url%/}/messages?limit=1" "$tmp" "$token" "$hosthdr")"; then
+        body="$(cat "$tmp" 2>/dev/null || true)"
+        rm -f "$tmp" 2>/dev/null || true
+        error "DELETE /messages (bulk) failed (request error): $body"
+        return 1
+    fi
+    body="$(cat "$tmp" 2>/dev/null || true)"
+    rm -f "$tmp" 2>/dev/null || true
+    if [[ "$code" != "200" ]]; then
+        error "DELETE /messages (bulk) failed (HTTP $code): $body"
+        return 1
+    fi
+    info "DELETE /messages (bulk) OK"
 
     tmp="$(mktemp_compat)"
     if ! code="$(retry 5 200 -- curl_request "DELETE" "${base_url%/}/accounts/${account_id}" "$tmp" "$token" "$hosthdr")"; then

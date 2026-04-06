@@ -2,6 +2,8 @@ package config
 
 import (
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -113,8 +115,24 @@ type SMTPServerConfig struct {
 	ReadTimeout     time.Duration `yaml:"readTimeout"`
 	WriteTimeout    time.Duration `yaml:"writeTimeout"`
 
+	// TLS/STARTTLS 配置（可选）。默认关闭（纯明文，保持向后兼容）。
+	TLS SMTPTLSConfig `yaml:"tls"`
+
 	// Debug HTTP server（健康检查/指标/pprof）。默认关闭；建议仅绑定 127.0.0.1。
 	Debug DebugServerConfig `yaml:"debug"`
+}
+
+type SMTPTLSConfig struct {
+	// Enabled=true 时启用 STARTTLS（对 EHLO 广播 STARTTLS，并接受 STARTTLS 升级）。
+	Enabled bool `yaml:"enabled"`
+	// CertFile/KeyFile 为 PEM 格式证书与私钥路径。
+	CertFile string `yaml:"certFile"`
+	KeyFile  string `yaml:"keyFile"`
+	// RequireTLS=true 时要求客户端在发送 MAIL/RCPT/DATA 前先 STARTTLS（否则返回 530）。
+	// 注意：这会影响可达性（部分发件方不支持 STARTTLS）；默认 false。
+	RequireTLS bool `yaml:"requireTLS"`
+	// MinVersion 可选：tls 最低版本（如 1.2/1.3）。为空表示默认 1.2。
+	MinVersion string `yaml:"minVersion"`
 }
 
 // DialectsConfig defines per-dialect settings (optional).
@@ -174,8 +192,8 @@ type NATSConfig struct {
 
 	// ConsumerAckWait/ConsumerMaxDeliver 用于 Worker 消费端（JetStream consumer）的关键参数。
 	// SMTP 侧不会使用这些字段，但为了统一配置仍放在 nats 段。
-	ConsumerAckWait   time.Duration `yaml:"consumerAckWait"`
-	ConsumerMaxDeliver int          `yaml:"consumerMaxDeliver"`
+	ConsumerAckWait    time.Duration `yaml:"consumerAckWait"`
+	ConsumerMaxDeliver int           `yaml:"consumerMaxDeliver"`
 }
 
 type MinIOConfig struct {
@@ -232,6 +250,13 @@ func Load(path string) (*Config, error) {
 				MaxRecipients:   50,
 				ReadTimeout:     60 * time.Second,
 				WriteTimeout:    60 * time.Second,
+				TLS: SMTPTLSConfig{
+					Enabled:    false,
+					CertFile:   "",
+					KeyFile:    "",
+					RequireTLS: false,
+					MinVersion: "",
+				},
 				Debug: DebugServerConfig{
 					Enabled: false,
 					Host:    "127.0.0.1",
@@ -267,12 +292,12 @@ func Load(path string) (*Config, error) {
 			MaxConnIdleTime:        5 * time.Minute,
 			AppName:                "mailapi",
 		},
-		Redis:   RedisConfig{Addr: "localhost:6379", DB: 0},
+		Redis: RedisConfig{Addr: "localhost:6379", DB: 0},
 		NATS: NATSConfig{
-			URL:               "nats://localhost:4222",
-			Stream:            "EMAILS",
-			Subject:           "emails.incoming",
-			ConsumerAckWait:   30 * time.Second,
+			URL:                "nats://localhost:4222",
+			Stream:             "EMAILS",
+			Subject:            "emails.incoming",
+			ConsumerAckWait:    30 * time.Second,
 			ConsumerMaxDeliver: 3,
 		},
 		MinIO:   MinIOConfig{Endpoint: "localhost:9000", AccessKey: "minioadmin", SecretKey: "minioadmin", Bucket: "attachments"},
@@ -294,5 +319,25 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
+	// 约定：TLS 证书路径允许写相对路径（相对于 config.yaml 所在目录），便于部署与打包。
+	// 注意：这里仅做路径归一化，不校验证书内容；证书可用性在 ValidateSMTPConfig/进程启动阶段检查。
+	cfg.Server.SMTP.TLS.CertFile = resolvePathRelativeToConfig(path, cfg.Server.SMTP.TLS.CertFile)
+	cfg.Server.SMTP.TLS.KeyFile = resolvePathRelativeToConfig(path, cfg.Server.SMTP.TLS.KeyFile)
+
 	return cfg, nil
+}
+
+func resolvePathRelativeToConfig(configPath, p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	if filepath.IsAbs(p) {
+		return p
+	}
+	base := filepath.Dir(configPath)
+	if base == "" || base == "." {
+		return filepath.Clean(p)
+	}
+	return filepath.Clean(filepath.Join(base, p))
 }

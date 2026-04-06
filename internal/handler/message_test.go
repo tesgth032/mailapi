@@ -122,6 +122,39 @@ func TestListMessages_PerPageClamped(t *testing.T) {
 	}
 }
 
+func TestListMessages_SeenFilter_UsesFilteredQuery(t *testing.T) {
+	accountOID := bson.NewObjectID()
+	var gotSeen *bool
+	var gotPage, gotPerPage int
+
+	ms := &mockStore{
+		listMessagesFilteredFunc: func(ctx context.Context, accountID bson.ObjectID, page, perPage int, seen *bool) ([]model.Message, int64, error) {
+			gotPage = page
+			gotPerPage = perPage
+			gotSeen = seen
+			return []model.Message{}, 0, nil
+		},
+	}
+	h := newTestHandler(ms, &mockCache{}, &mockStorage{})
+
+	c, w := newTestContext("GET", "/messages?seen=true&page=2&itemsPerPage=10", nil)
+	setAuth(c, accountOID.Hex(), "user@example.com")
+	h.ListMessages(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d, want %d; body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if gotPage != 2 {
+		t.Fatalf("page=%d, want 2", gotPage)
+	}
+	if gotPerPage != 10 {
+		t.Fatalf("perPage=%d, want 10", gotPerPage)
+	}
+	if gotSeen == nil || *gotSeen != true {
+		t.Fatalf("seen=%v, want true", gotSeen)
+	}
+}
+
 func TestListMessages_DownloadURLSet(t *testing.T) {
 	accountOID := bson.NewObjectID()
 	msgOID := bson.NewObjectID()

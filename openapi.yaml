@@ -1,0 +1,913 @@
+openapi: 3.0.3
+info:
+  title: MailAPI (DuckMail-Compatible)
+  version: 0.1.0
+  description: |
+    MailAPI 的主 API（duck dialect），整体风格兼容 mail.tm / DuckMail。
+
+    统一认证：所有认证均使用 `Authorization: Bearer <token>`：
+    - API Key：以 `sk_`（默认）或 `dk_`（兼容）开头
+    - JWT：由 `POST /token` 返回
+
+    说明：
+    - 启用 `server.api.baseHost` 后，可通过 `<dialect>.<baseHost>` 子域前缀切换 API 风格（见 `API_DIALECTS.md`）。
+    - `cfworker` dialect 为代理转发到上游 Worker，不在本 OpenAPI 文件范围内（见 `cfworker.md`）。
+
+servers:
+  - url: http://localhost:8080
+
+tags:
+  - name: Domains
+  - name: Accounts
+  - name: Messages
+  - name: SSE
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Use `Authorization: Bearer <token>`.
+        Token can be an API key (`sk_...` / `dk_...`) or a JWT (from `POST /token`).
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        code:
+          type: integer
+          format: int32
+        message:
+          type: string
+      required: [code, message]
+
+    Domain:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Mongo ObjectID hex
+          example: "6789abcdef012345abcdef01"
+        domain:
+          type: string
+          example: "example.com"
+        isActive:
+          type: boolean
+        isPrivate:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required: [id, domain, isActive, isPrivate, createdAt, updatedAt]
+
+    DomainCollection:
+      type: object
+      properties:
+        "@context":
+          type: string
+          example: "/contexts/Domain"
+        "@id":
+          type: string
+          example: "/domains"
+        "@type":
+          type: string
+          example: "hydra:Collection"
+        "hydra:totalItems":
+          type: integer
+          format: int64
+        "hydra:member":
+          type: array
+          items:
+            $ref: "#/components/schemas/Domain"
+      required: ["@context", "@id", "@type", "hydra:totalItems", "hydra:member"]
+
+    Account:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Mongo ObjectID hex
+        address:
+          type: string
+          example: "user123@example.com"
+        quota:
+          type: integer
+          format: int64
+          description: bytes
+        used:
+          type: integer
+          format: int64
+          description: bytes
+        isDeleted:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required: [id, address, quota, used, isDeleted, createdAt, updatedAt]
+
+    CreateAccountRequest:
+      type: object
+      properties:
+        address:
+          type: string
+          description: Full email address. Either address or domain must be provided.
+        domain:
+          type: string
+          description: Domain only. Server will auto-generate a human-like prefix.
+        password:
+          type: string
+          minLength: 6
+      required: [password]
+
+    TokenRequest:
+      type: object
+      properties:
+        address:
+          type: string
+        password:
+          type: string
+      required: [address, password]
+
+    TokenResponse:
+      type: object
+      properties:
+        token:
+          type: string
+        id:
+          type: string
+      required: [token, id]
+
+    Address:
+      type: object
+      properties:
+        name:
+          type: string
+        address:
+          type: string
+      required: [name, address]
+
+    Attachment:
+      type: object
+      properties:
+        id:
+          type: string
+        filename:
+          type: string
+        contentType:
+          type: string
+        disposition:
+          type: string
+        transferEncoding:
+          type: string
+        size:
+          type: integer
+          format: int64
+      required: [id, filename, contentType, disposition, transferEncoding, size]
+
+    Message:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Mongo ObjectID hex
+        accountId:
+          type: string
+          description: Mongo ObjectID hex
+        msgid:
+          type: string
+        from:
+          $ref: "#/components/schemas/Address"
+        to:
+          type: array
+          items:
+            $ref: "#/components/schemas/Address"
+        cc:
+          type: array
+          items:
+            $ref: "#/components/schemas/Address"
+        bcc:
+          type: array
+          items:
+            $ref: "#/components/schemas/Address"
+        subject:
+          type: string
+        intro:
+          type: string
+        text:
+          type: string
+        html:
+          type: array
+          items:
+            type: string
+        hasAttachments:
+          type: boolean
+        attachments:
+          type: array
+          items:
+            $ref: "#/components/schemas/Attachment"
+        size:
+          type: integer
+          format: int64
+          description: bytes
+        seen:
+          type: boolean
+        isDeleted:
+          type: boolean
+        keep:
+          type: boolean
+          description: Long-term retention flag (TTL is skipped when keep=true).
+        flagged:
+          type: boolean
+        retention:
+          type: boolean
+        retentionDate:
+          type: string
+          format: date-time
+        downloadUrl:
+          type: string
+          example: "/messages/6789abcdef012345abcdef10/download"
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    MessageCollection:
+      type: object
+      properties:
+        "@context":
+          type: string
+          example: "/contexts/Message"
+        "@id":
+          type: string
+          example: "/messages"
+        "@type":
+          type: string
+          example: "hydra:Collection"
+        "hydra:totalItems":
+          type: integer
+          format: int64
+        "hydra:member":
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+        nextCursor:
+          type: string
+          description: Seek-pagination cursor in form "<unix_ms>.<messageId>".
+      required: ["@context", "@id", "@type", "hydra:totalItems", "hydra:member"]
+
+    UpdateMessageRequest:
+      type: object
+      properties:
+        seen:
+          type: boolean
+        keep:
+          type: boolean
+      additionalProperties: false
+
+    BulkUpdateMessagesRequest:
+      type: object
+      properties:
+        ids:
+          type: array
+          items:
+            type: string
+        all:
+          type: boolean
+          description: When true, update all messages of the account. ids must be empty.
+        seen:
+          type: boolean
+        keep:
+          type: boolean
+      additionalProperties: false
+
+    BulkUpdateMessagesResponse:
+      type: object
+      properties:
+        modified:
+          type: integer
+          format: int64
+      required: [modified]
+
+    BulkDeleteByIDsRequest:
+      type: object
+      properties:
+        ids:
+          type: array
+          items:
+            type: string
+      required: [ids]
+
+    BulkDeleteResponse:
+      type: object
+      properties:
+        deleted:
+          type: integer
+          format: int64
+        totalSize:
+          type: integer
+          format: int64
+          description: bytes
+      required: [deleted, totalSize]
+
+    BulkDeleteByAccountResponse:
+      type: object
+      properties:
+        deleted:
+          type: integer
+          format: int32
+        totalSize:
+          type: integer
+          format: int64
+          description: bytes
+        truncated:
+          type: boolean
+        seenFilter:
+          nullable: true
+          oneOf:
+            - type: boolean
+            - type: "null"
+      required: [deleted, totalSize, truncated]
+
+paths:
+  /domains:
+    get:
+      tags: [Domains]
+      summary: List available domains
+      description: |
+        Returns active domains filtered by API key permissions.
+        Private domains (`isPrivate=true`) require explicit allowlisting even for wildcard keys.
+      security:
+        - bearerAuth: []
+        - {}
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainCollection"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /accounts:
+    post:
+      tags: [Accounts]
+      summary: Create an account
+      description: |
+        Create a temporary account. Provide either:
+        - `address` (full email), or
+        - `domain` (server will auto-generate prefix)
+      security:
+        - bearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateAccountRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Account" }
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /token:
+    post:
+      tags: [Accounts]
+      summary: Login and get JWT token
+      description: |
+        Returns a JWT token for subsequent authenticated calls.
+
+        When API keys are configured, it's recommended to also pass an API key
+        (to enforce domain-level access control), especially for private domains.
+      security:
+        - bearerAuth: []
+        - {}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TokenRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /addresses/random:
+    get:
+      tags: [Accounts]
+      summary: Generate random email addresses (not persisted)
+      security:
+        - bearerAuth: []
+        - {}
+      parameters:
+        - in: query
+          name: domain
+          schema: { type: string }
+          required: true
+        - in: query
+          name: count
+          schema:
+            type: integer
+            format: int32
+            default: 1
+            minimum: 1
+            maximum: 50
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  addresses:
+                    type: array
+                    items: { type: string }
+                required: [addresses]
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /me:
+    get:
+      tags: [Accounts]
+      summary: Get current user (JWT required)
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Account" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /accounts/{id}:
+    get:
+      tags: [Accounts]
+      summary: Get account by id (JWT required)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Account" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+    delete:
+      tags: [Accounts]
+      summary: Delete account (JWT required)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204":
+          description: No Content
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /messages:
+    get:
+      tags: [Messages]
+      summary: List messages (JWT required)
+      description: |
+        Supports both:
+        - skip pagination: `page` + `itemsPerPage`
+        - seek pagination: `cursor` (recommended) / `after`
+
+        Optional filter: `seen=true|false`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, format: int32, default: 1, minimum: 1 }
+        - in: query
+          name: itemsPerPage
+          schema: { type: integer, format: int32, default: 30, minimum: 1, maximum: 100 }
+        - in: query
+          name: cursor
+          schema: { type: string }
+          description: Seek cursor (use response nextCursor)
+        - in: query
+          name: after
+          schema: { type: string }
+          description: Cursor alias (compat)
+        - in: query
+          name: seen
+          schema: { type: boolean }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MessageCollection" }
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Not Found (cursor not found)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+    patch:
+      tags: [Messages]
+      summary: Bulk update message flags (JWT required)
+      description: |
+        Bulk update message flags.
+
+        - Default: update specified `ids`
+        - When `all=true`: update all messages of the account (ids must be empty)
+
+        Note: `keep` may be disabled by server env; if disabled it returns 403.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BulkUpdateMessagesRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BulkUpdateMessagesResponse" }
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+    delete:
+      tags: [Messages]
+      summary: Bulk delete messages by account (JWT required)
+      description: |
+        Soft-delete messages of the account. Optional `seen=true|false` filter.
+
+        Use `limit` to cap the number of deleted messages (default 5000, max 20000).
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: seen
+          schema: { type: boolean }
+        - in: query
+          name: limit
+          schema: { type: integer, format: int32, default: 5000, minimum: 1, maximum: 20000 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BulkDeleteByAccountResponse" }
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /messages/bulk-delete:
+    post:
+      tags: [Messages]
+      summary: Bulk delete messages by IDs (JWT required)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/BulkDeleteByIDsRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BulkDeleteResponse" }
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /messages/{id}:
+    get:
+      tags: [Messages]
+      summary: Get message detail (JWT required)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+    patch:
+      tags: [Messages]
+      summary: Update message flags (JWT required)
+      description: |
+        Update message flags (seen/keep).
+        Note: `keep` may be disabled by server env; if disabled it returns 403.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateMessageRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+    delete:
+      tags: [Messages]
+      summary: Delete message (JWT required)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "204":
+          description: No Content
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /messages/{id}/download:
+    get:
+      tags: [Messages]
+      summary: Download raw .eml (JWT required)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: RFC 822 raw message
+          content:
+            message/rfc822:
+              schema:
+                type: string
+                format: binary
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /messages/{id}/attachments/{attachmentId}:
+    get:
+      tags: [Messages]
+      summary: Download attachment (JWT required)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string }
+        - in: path
+          name: attachmentId
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Attachment file
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: Forbidden
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /sse:
+    get:
+      tags: [SSE]
+      summary: Server-Sent Events stream (JWT required)
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                example: |
+                  event: message
+                  data: {"id":"...","subject":"..."}
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }

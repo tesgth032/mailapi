@@ -234,7 +234,7 @@ func TestSession_Rcpt_RedisMiss_FallbackLookup_WarmsRedis(t *testing.T) {
 			return &model.Account{Address: address, CreatedAt: time.Now().Add(-time.Hour)}, nil
 		},
 	}
-	b := NewBackend(mc, &mockSMTPQueue{}, lookup, 24*time.Hour, "test.example.com", nil, 20<<20)
+	b := NewBackend(mc, &mockSMTPQueue{}, lookup, 24*time.Hour, false, "test.example.com", nil, 20<<20)
 	s := &Session{backend: b, remoteAddr: "127.0.0.1:12345"}
 
 	err := s.Rcpt("User@Example.COM", &gosmtp.RcptOptions{})
@@ -260,7 +260,7 @@ func TestSession_Rcpt_RedisMiss_FallbackNotFound(t *testing.T) {
 			return nil, store.ErrNotFound
 		},
 	}
-	b := NewBackend(mc, &mockSMTPQueue{}, lookup, 24*time.Hour, "test.example.com", nil, 20<<20)
+	b := NewBackend(mc, &mockSMTPQueue{}, lookup, 24*time.Hour, false, "test.example.com", nil, 20<<20)
 	s := &Session{backend: b, remoteAddr: "127.0.0.1:12345"}
 
 	err := s.Rcpt("unknown@example.com", &gosmtp.RcptOptions{})
@@ -437,7 +437,7 @@ func TestNewServer(t *testing.T) {
 		queue:  &mockSMTPQueue{},
 		domain: "test.example.com",
 	}
-	srv := NewServer(b, "0.0.0.0:2525", "test.example.com", 20<<20, 50, 60*time.Second, 60*time.Second)
+	srv := NewServer(b, "0.0.0.0:2525", "test.example.com", 20<<20, 50, 60*time.Second, 60*time.Second, nil)
 	if srv.Addr != "0.0.0.0:2525" {
 		t.Errorf("Addr = %q, want %q", srv.Addr, "0.0.0.0:2525")
 	}

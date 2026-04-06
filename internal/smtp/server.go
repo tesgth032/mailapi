@@ -2,6 +2,7 @@ package smtp
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -35,6 +36,7 @@ type Backend struct {
 	queue           queue.Interface
 	lookup          RecipientLookup
 	accountTTL      time.Duration
+	requireTLS      bool
 	lookupSF        singleflight.Group
 	lookupSem       chan struct{}
 	negAddrCache    *ttlSet
@@ -55,7 +57,7 @@ type RecipientLookup interface {
 // NewBackend creates a new SMTP backend.
 // allowedDomains restricts which email domains this listener accepts.
 // Pass nil to accept all domains (backward compatible behavior).
-func NewBackend(c cache.Interface, q queue.Interface, lookup RecipientLookup, accountTTL time.Duration, domain string, allowedDomains []string, maxMessageBytes int64) *Backend {
+func NewBackend(c cache.Interface, q queue.Interface, lookup RecipientLookup, accountTTL time.Duration, requireTLS bool, domain string, allowedDomains []string, maxMessageBytes int64) *Backend {
 	maxLookup := runtime.GOMAXPROCS(0) * 32
 	if maxLookup < 32 {
 		maxLookup = 32
@@ -69,6 +71,7 @@ func NewBackend(c cache.Interface, q queue.Interface, lookup RecipientLookup, ac
 		queue:           q,
 		lookup:          lookup,
 		accountTTL:      accountTTL,
+		requireTLS:      requireTLS,
 		lookupSem:       make(chan struct{}, maxLookup),
 		negAddrCache:    newTTLSet(200000, 30*time.Second),
 		domain:          domain,
@@ -87,6 +90,7 @@ func NewBackend(c cache.Interface, q queue.Interface, lookup RecipientLookup, ac
 
 func (b *Backend) NewSession(conn *gosmtp.Conn) (gosmtp.Session, error) {
 	remoteAddr := conn.Conn().RemoteAddr().String()
+	_, isTLS := conn.Conn().(*tls.Conn)
 
 	// SMTP-level rate limiting: 100 messages per minute per IP
 	ip := remoteAddr
@@ -110,6 +114,7 @@ func (b *Backend) NewSession(conn *gosmtp.Conn) (gosmtp.Session, error) {
 	return &Session{
 		backend:    b,
 		remoteAddr: remoteAddr,
+		isTLS:      isTLS,
 	}, nil
 }
 
@@ -119,6 +124,7 @@ type Session struct {
 	from       string
 	to         []string
 	remoteAddr string
+	isTLS      bool
 }
 
 // SMTP 成功路径日志采样：避免高吞吐下日志本身成为 CPU/IO 热点。
@@ -132,12 +138,18 @@ func (s *Session) AuthPlain(username, password string) error {
 }
 
 func (s *Session) Mail(from string, opts *gosmtp.MailOptions) error {
+	if s.backend != nil && s.backend.requireTLS && !s.isTLS {
+		return tlsRequiredError()
+	}
 	s.from = from
 	return nil
 }
 
 func (s *Session) Rcpt(to string, opts *gosmtp.RcptOptions) error {
 	addr := strings.ToLower(to)
+	if s.backend != nil && s.backend.requireTLS && !s.isTLS {
+		return tlsRequiredError()
+	}
 
 	// Check if domain is allowed on this listener
 	if len(s.backend.allowedSet) > 0 {
@@ -385,6 +397,9 @@ func (s *ttlSet) maybeSweep(now time.Time) {
 }
 
 func (s *Session) Data(r io.Reader) error {
+	if s.backend != nil && s.backend.requireTLS && !s.isTLS {
+		return tlsRequiredError()
+	}
 	// Read raw message with size limit (enforced by go-smtp MaxMessageBytes,
 	// but we also guard here). Use configured maxMessageBytes (fallback 20MB).
 	maxBytes := s.backend.maxMessageBytes
@@ -446,8 +461,16 @@ func (s *Session) Logout() error {
 	return nil
 }
 
+func tlsRequiredError() *gosmtp.SMTPError {
+	return &gosmtp.SMTPError{
+		Code:         530,
+		EnhancedCode: gosmtp.EnhancedCode{5, 7, 0},
+		Message:      "Must issue STARTTLS first",
+	}
+}
+
 // NewServer creates a configured go-smtp server for a single listener.
-func NewServer(b *Backend, addr, domain string, maxMsgBytes int64, maxRecipients int, readTimeout, writeTimeout time.Duration) *gosmtp.Server {
+func NewServer(b *Backend, addr, domain string, maxMsgBytes int64, maxRecipients int, readTimeout, writeTimeout time.Duration, tlsConfig *tls.Config) *gosmtp.Server {
 	srv := gosmtp.NewServer(b)
 	srv.Addr = addr
 	srv.Domain = domain
@@ -456,6 +479,7 @@ func NewServer(b *Backend, addr, domain string, maxMsgBytes int64, maxRecipients
 	srv.ReadTimeout = readTimeout
 	srv.WriteTimeout = writeTimeout
 	srv.AllowInsecureAuth = true
+	srv.TLSConfig = tlsConfig
 	return srv
 }
 

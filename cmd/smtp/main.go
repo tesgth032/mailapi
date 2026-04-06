@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -86,6 +87,27 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	// Optional: STARTTLS (RFC 3207)
+	var tlsConfig *tls.Config
+	if cfg.Server.SMTP.TLS.Enabled {
+		cert, err := tls.LoadX509KeyPair(cfg.Server.SMTP.TLS.CertFile, cfg.Server.SMTP.TLS.KeyFile)
+		if err != nil {
+			log.Fatalf("Failed to load SMTP TLS cert/key: %v", err)
+		}
+		minVer := uint16(tls.VersionTLS12)
+		if s := strings.TrimSpace(cfg.Server.SMTP.TLS.MinVersion); s != "" {
+			if v, ok := config.ParseTLSMinVersion(s); ok {
+				minVer = v
+			} else {
+				log.Fatalf("Invalid server.smtp.tls.minVersion: %q", cfg.Server.SMTP.TLS.MinVersion)
+			}
+		}
+		tlsConfig = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   minVer,
+		}
+	}
+
 	// Optional: MongoDB lookup for RCPT TO self-heal when Redis misses (e.g., Redis flush/data loss).
 	// 若未配置/未连通，则 SMTP 仍可运行，但地址缓存自愈能力会被禁用（完全依赖 Redis addr:* 缓存）。
 	var lookup smtpserver.RecipientLookup
@@ -169,7 +191,7 @@ func main() {
 		}()
 	}
 
-	servers, err := startSMTPServers(cfg, ca, q, lookup)
+	servers, err := startSMTPServers(cfg, ca, q, lookup, tlsConfig)
 	if err != nil {
 		log.Fatalf("Failed to start SMTP server(s): %v", err)
 	}
@@ -191,7 +213,7 @@ func main() {
 	log.Println("SMTP server(s) stopped")
 }
 
-func startSMTPServers(cfg *config.Config, ca *cache.Cache, q *queue.Queue, lookup smtpserver.RecipientLookup) ([]*gosmtp.Server, error) {
+func startSMTPServers(cfg *config.Config, ca *cache.Cache, q *queue.Queue, lookup smtpserver.RecipientLookup, tlsConfig *tls.Config) ([]*gosmtp.Server, error) {
 	if cfg == nil {
 		return nil, errors.New("nil config")
 	}
@@ -213,11 +235,11 @@ func startSMTPServers(cfg *config.Config, ca *cache.Cache, q *queue.Queue, looku
 		}
 
 		for _, l := range listeners {
-			backend := smtpserver.NewBackend(ca, q, lookup, cfg.Account.TTL, cfg.Server.SMTP.Domain, l.Domains, cfg.Server.SMTP.MaxMessageBytes)
+			backend := smtpserver.NewBackend(ca, q, lookup, cfg.Account.TTL, cfg.Server.SMTP.TLS.RequireTLS, cfg.Server.SMTP.Domain, l.Domains, cfg.Server.SMTP.MaxMessageBytes)
 			srv := smtpserver.NewServer(
 				backend, l.Addr, cfg.Server.SMTP.Domain,
 				cfg.Server.SMTP.MaxMessageBytes, cfg.Server.SMTP.MaxRecipients,
-				cfg.Server.SMTP.ReadTimeout, cfg.Server.SMTP.WriteTimeout,
+				cfg.Server.SMTP.ReadTimeout, cfg.Server.SMTP.WriteTimeout, tlsConfig,
 			)
 			servers = append(servers, srv)
 
@@ -235,11 +257,11 @@ func startSMTPServers(cfg *config.Config, ca *cache.Cache, q *queue.Queue, looku
 
 	// Single-listener mode (backward compatible: no domains in config)
 	addr := fmt.Sprintf("%s:%d", cfg.Server.SMTP.Host, cfg.Server.SMTP.Port)
-	backend := smtpserver.NewBackend(ca, q, lookup, cfg.Account.TTL, cfg.Server.SMTP.Domain, nil, cfg.Server.SMTP.MaxMessageBytes)
+	backend := smtpserver.NewBackend(ca, q, lookup, cfg.Account.TTL, cfg.Server.SMTP.TLS.RequireTLS, cfg.Server.SMTP.Domain, nil, cfg.Server.SMTP.MaxMessageBytes)
 	srv := smtpserver.NewServer(
 		backend, addr, cfg.Server.SMTP.Domain,
 		cfg.Server.SMTP.MaxMessageBytes, cfg.Server.SMTP.MaxRecipients,
-		cfg.Server.SMTP.ReadTimeout, cfg.Server.SMTP.WriteTimeout,
+		cfg.Server.SMTP.ReadTimeout, cfg.Server.SMTP.WriteTimeout, tlsConfig,
 	)
 	servers = append(servers, srv)
 

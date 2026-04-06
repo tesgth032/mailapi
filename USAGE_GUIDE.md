@@ -4,6 +4,8 @@
 
 This guide is for API consumers (frontend developers, third-party integrators) and operators, providing complete installation, endpoint usage examples, and best practices.
 
+OpenAPI（duck 主风格）/ OpenAPI (duck dialect): `openapi.yaml`
+
 ---
 
 ## 目录 / Table of Contents
@@ -250,6 +252,11 @@ API 服务启动时会自动将这些域名同步到 MongoDB。
 
 The API service automatically syncs these domains to MongoDB on startup.
 
+补充说明 / Notes:
+
+- `isPrivate: true` 的域名会被视为“私有域名”：不会被 wildcard（`domains: ["*"]`）API Key 隐式放开，必须显式在该 Key 的 `domains` 列表中列出该域名（例如 `["*", "vip.example.com"]`），否则该私有域名对该 Key 不可见/不可用。
+- A domain with `isPrivate: true` is treated as "private": it will NOT be implicitly included by wildcard API keys (`domains: ["*"]`). You must explicitly list it in the API key's `domains` (e.g. `["*", "vip.example.com"]`) to make it visible/usable.
+
 ### 3.2 API Key 配置 / API Key Configuration
 
 API Key 默认使用 `sk_` 前缀（兼容 DuckMail `dk_`），通过 `Authorization: Bearer sk_xxx` 头传递。
@@ -260,7 +267,7 @@ API keys use `sk_` prefix by default (`dk_` also accepted), passed via the `Auth
 apiKeys:
   - key: "sk_abc123def456ghi789"      # sk_ 前缀密钥 / sk_ prefixed key
     name: "Admin"                      # 描述性名称 / Descriptive name
-    domains: ["*"]                     # ["*"] = 所有域名 / all domains
+    domains: ["*"]                     # ["*"] = 所有公开域名 / all public domains (private domains still require explicit listing)
     rpmLimit: 0                        # 0 = 不限速 / unlimited
   - key: "sk_partner_key_here"
     name: "Partner"
@@ -369,7 +376,7 @@ curl -s http://localhost:8080/domains \
 **说明 / Notes:**
 - 只返回 `isActive: true` 的域名 / Only returns active domains
 - 结果按当前 API Key 的域名权限过滤 / Filtered by current API key's domain permissions
-- 通配符 Key（`["*"]`）返回所有域名 / Wildcard key returns all domains
+- 通配符 Key（`["*"]`）默认返回所有**公开**域名；私有域名（`isPrivate=true`）必须显式授权才会返回 / Wildcard key returns all *public* domains by default; private domains require explicit allowlist
 
 ---
 
@@ -396,7 +403,7 @@ curl -H "Authorization: Bearer eyJhbGciOi..." http://localhost:8080/me
 Different keys see different domains and data:
 
 ```bash
-# Admin Key (domains: ["*"]) — 看到所有域名 / sees all domains
+# Admin Key (domains: ["*", "vip.example.com"]) — 看到所有公开域名 + 显式授权的私有域名 / sees all public domains + explicitly allowed private domains
 curl -H "Authorization: Bearer sk_admin_key" http://localhost:8080/domains
 # → ["example.com", "vip.example.com"]
 
@@ -631,6 +638,18 @@ curl -s "http://localhost:8080/messages?cursor=<nextCursor>&itemsPerPage=20" \
 - 仍支持旧写法：`after=<messageId>`（仅传 messageId）。但这种写法服务端需要额外查询一次 `createdAt` 来构造 seek 条件，性能略差。
 - 推荐使用服务端返回的 `nextCursor`，以减少一次 MongoDB 查询。
 
+#### seen 过滤 / Filter by seen
+
+```bash
+# 仅看已读 / Seen only
+curl -s "http://localhost:8080/messages?seen=true&itemsPerPage=20" \
+  -H "Authorization: Bearer <jwt_token>" | jq
+
+# 仅看未读 / Unseen only（也可与 cursor 分页组合使用）
+curl -s "http://localhost:8080/messages?seen=false&cursor=<nextCursor>&itemsPerPage=20" \
+  -H "Authorization: Bearer <jwt_token>" | jq
+```
+
 ### 9.2 获取邮件详情 / Get Message Detail
 
 ```bash
@@ -682,6 +701,67 @@ curl -s -X PATCH http://localhost:8080/messages/6789abcdef012345abcdef10 \
 ```bash
 curl -s -X DELETE http://localhost:8080/messages/6789abcdef012345abcdef10 \
   -H "Authorization: Bearer <jwt_token>"
+```
+
+### 9.6 批量更新 flags（seen/keep）/ Bulk Update Flags (seen/keep)
+
+按 ids 批量更新 / Update by IDs:
+
+```bash
+curl -s -X PATCH http://localhost:8080/messages \
+  -H "Authorization: Bearer <jwt_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"ids":["6789abcdef012345abcdef10","6789abcdef012345abcdef11"],"seen":true}' | jq
+```
+
+按账号全量更新 / Update all messages of the account:
+
+```bash
+curl -s -X PATCH http://localhost:8080/messages \
+  -H "Authorization: Bearer <jwt_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"all":true,"seen":false}' | jq
+```
+
+返回 / Response:
+
+```json
+{"modified": 2}
+```
+
+注意 / Note:
+
+- `keep` 同样支持批量更新，但受 `MAILAPI_API_ALLOW_MESSAGE_KEEP=1` 控制，未开启会返回 `403`。
+- `ids` 模式下最多 2000 个 id；`all=true` 时必须不传 `ids`。
+
+### 9.7 按账号批量删除（软删）/ Bulk Delete by Account (Soft delete)
+
+删除该账号下的消息（可选按 seen 过滤），适合“一键清空收件箱”。默认上限 5000 条，可用 `limit` 调整（最大 20000）。删除后会尝试回收 `used` 配额，并后台纠偏一次。
+
+```bash
+curl -s -X DELETE "http://localhost:8080/messages?seen=true&limit=5000" \
+  -H "Authorization: Bearer <jwt_token>" | jq
+```
+
+返回 / Response:
+
+```json
+{"deleted": 3, "totalSize": 12345, "truncated": false, "seenFilter": true}
+```
+
+### 9.8 按 ids 批量删除（软删）/ Bulk Delete by IDs (Soft delete)
+
+```bash
+curl -s -X POST http://localhost:8080/messages/bulk-delete \
+  -H "Authorization: Bearer <jwt_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"ids":["6789abcdef012345abcdef10","6789abcdef012345abcdef11"]}' | jq
+```
+
+返回 / Response:
+
+```json
+{"deleted": 2, "totalSize": 12345}
 ```
 
 ---
@@ -1099,8 +1179,28 @@ for event in client.events():
 ### 网络 / Network
 
 - SMTP 端口 25 需要云服务商开放 / Port 25 must be allowed by cloud provider
+- SMTP 可选开启 STARTTLS（RFC 3207）：通过 `server.smtp.tls.enabled=true` 启用，并配置 `certFile/keyFile`。如需强制对方先加密再投递，可设置 `requireTLS=true`（不支持 STARTTLS 的客户端会被拒绝，返回 530）。
 - API 层在 Nginx/HAProxy 后终止 TLS / Terminate TLS at reverse proxy
 - 生产环境所有 Docker 端口应限制为内网访问 / Bind Docker ports to internal IPs
+
+示例 / Example:
+
+```yaml
+server:
+  smtp:
+    tls:
+      enabled: true
+      certFile: "/opt/mailapi/certs/smtp.crt"
+      keyFile: "/opt/mailapi/certs/smtp.key"
+      requireTLS: false
+      minVersion: "1.2"
+```
+
+验证 / Verify:
+
+```bash
+openssl s_client -starttls smtp -connect mail.example.com:25 -servername mail.example.com
+```
 
 ### 监控 / Monitoring
 

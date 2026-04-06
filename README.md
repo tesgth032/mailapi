@@ -59,6 +59,9 @@ A temporary email backend service benchmarked against [mail.tm](https://mail.tm)
 - **多 IP 绑定** — 不同域名可绑定到不同 IP 地址的 SMTP 监听器，按域名路由收件
 - **Multi-IP Binding** — Different domains can bind to different IP-based SMTP listeners, routing by domain
 
+- **SMTP STARTTLS（可选）** — 可通过 `server.smtp.tls.enabled=true` 启用 STARTTLS（RFC 3207），并支持 `requireTLS` 强制先加密再投递
+- **SMTP STARTTLS (optional)** — Enable STARTTLS (RFC 3207) via `server.smtp.tls.enabled=true`, with optional `requireTLS` enforcement
+
 - **多服务器分布式** — 多台服务器共享同一配置，各节点自动检测本机 IP 并启动对应监听器
 - **Multi-Server Distributed** — Multiple servers share one config; each node auto-detects local IPs and starts matching listeners
 
@@ -158,6 +161,10 @@ domains:
     ips: ["192.168.1.101"]     # 另一个 IP / another IP
 ```
 
+> Note: `isPrivate: true` 的域名不会被 wildcard（`domains: ["*"]`）API Key 隐式放开，必须显式在该 Key 的 `domains` 列表中列出（例如 `["*", "example.net"]`）。
+>
+> A domain with `isPrivate: true` will NOT be implicitly included by wildcard API keys (`domains: ["*"]`). You must explicitly list it in the key's `domains` (e.g. `["*", "example.net"]`).
+
 ### API Key 鉴权 / API Key Authentication
 
 API Key 默认使用 `sk_` 前缀（兼容 DuckMail 标准 `dk_`）。所有认证统一通过 `Authorization: Bearer` 头传递——API Key 和 JWT 共享同一个头，系统通过 `sk_`/`dk_` 前缀自动区分。
@@ -168,7 +175,7 @@ API keys use `sk_` prefix by default (`dk_` is also accepted). All authenticatio
 apiKeys:
   - key: "sk_your_admin_key_here"
     name: "Admin"
-    domains: ["*"]              # 通配符：全部域名 / wildcard: all domains
+    domains: ["*"]              # 通配符：全部公开域名 / wildcard: all public domains (private domains still require explicit listing)
     rpmLimit: 0                 # 不限速（仅受全局限速）/ unlimited (global limit only)
   - key: "sk_your_partner_key_here"
     name: "Partner"
@@ -236,6 +243,9 @@ domains:
 | `GET` | `/accounts/:id` | 获取账号信息 / Get account |
 | `DELETE` | `/accounts/:id` | 删除账号（级联删除邮件和附件）/ Delete account (cascades) |
 | `GET` | `/messages` | 分页邮件列表 / Paginated message list |
+| `PATCH` | `/messages` | 批量更新 flags（seen/keep）/ Bulk update flags (seen/keep) |
+| `DELETE` | `/messages` | 按账号批量软删（可按 seen 过滤）/ Bulk soft delete by account (optional seen filter) |
+| `POST` | `/messages/bulk-delete` | 按 ids 批量软删 / Bulk soft delete by ids |
 | `GET` | `/messages/:id` | 邮件详情 / Message detail |
 | `PATCH` | `/messages/:id` | 更新邮件状态（seen/keep）/ Update flags (seen/keep) |
 | `DELETE` | `/messages/:id` | 删除邮件 / Delete message |
@@ -246,7 +256,12 @@ domains:
 消息分页与保留说明 / Notes:
 
 - `/messages` 同时支持传统分页（`page/itemsPerPage`）与高性能 cursor 分页（`cursor`/`after`，响应包含 `nextCursor`）。
+- `/messages` 支持 `seen=true/false` 过滤，并为该查询模式建立了复合索引（适合高并发列表页）。
 - 邮件默认按 `message.ttl` 自动过期删除（TTL）。如需长期保留某封邮件，可 `PATCH /messages/:id` 传 `{"keep": true}`。该能力默认关闭，需要在 API 服务进程显式设置环境变量：`MAILAPI_API_ALLOW_MESSAGE_KEEP=1`（或 `MAILAPI_ALLOW_MESSAGE_KEEP=1`）。
+
+OpenAPI:
+
+- 见仓库根目录的 `openapi.yaml`（DuckMail 风格主 API）。
 
 ### 速率限制 / Rate Limiting
 

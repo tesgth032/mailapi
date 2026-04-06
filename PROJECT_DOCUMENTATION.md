@@ -622,9 +622,11 @@ Authorization: Bearer <token>
 
 ### 向后兼容 / Backward Compatibility
 
-如果 `config.yaml` 中未配置任何 `apiKeys`，系统以通配符 `["*"]` 运行——所有域名对所有请求开放，与引入 API Key 之前的行为完全一致。
+如果 `config.yaml` 中未配置任何 `apiKeys`，系统会以通配符 `["*"]` 的方式运行，**所有公开域名**对所有请求开放，与引入 API Key 之前的行为基本一致。
+但若你启用了私有域名（`isPrivate=true`），则该私有域名仍需要“显式授权”（建议启用 API Key 并在 `apiKeys[].domains` 中列出该私有域名），否则私有域名对匿名/通配符请求不可见也不可用。
 
-If no `apiKeys` are configured in `config.yaml`, the system runs with wildcard `["*"]` — all domains are open to all requests, identical to the behavior before API keys were introduced.
+If no `apiKeys` are configured in `config.yaml`, the system runs with wildcard `["*"]` and opens **all public domains** to all requests, largely identical to the behavior before API keys were introduced.
+However, if you enable private domains (`isPrivate=true`), the private domain still requires explicit authorization (recommended: enable API keys and list the private domain in `apiKeys[].domains`), otherwise it will not be visible/usable for anonymous/wildcard requests.
 
 ### 辅助函数 / Helper Functions
 
@@ -642,6 +644,8 @@ If no `apiKeys` are configured in `config.yaml`, the system runs with wildcard `
 ## 8. API 接口 / API Endpoints
 
 > 源码位置 / Source: `internal/handler/`
+>
+> OpenAPI（duck 主风格）/ OpenAPI (duck dialect): `openapi.yaml`
 
 所有认证统一通过 `Authorization: Bearer` 头传递。当配置了 API Key 时，公开接口需要 `sk_`/`dk_` API Key 或 JWT；认证接口需要 JWT。
 
@@ -700,7 +704,10 @@ Generate random human-like email addresses (without creating accounts). Query pa
 | `GET` | `/me` | 获取当前用户 / Get current user |
 | `GET` | `/accounts/:id` | 获取账号信息 / Get account |
 | `DELETE` | `/accounts/:id` | 删除账号（级联删除邮件和附件）/ Delete account (cascades) |
-| `GET` | `/messages` | 分页邮件列表 / Paginated message list |
+| `GET` | `/messages` | 分页邮件列表（支持 `cursor/after` + `nextCursor`，可选 `seen=true/false` 过滤）/ List messages (cursor pagination + optional seen filter) |
+| `PATCH` | `/messages` | 批量更新 flags（seen/keep）/ Bulk update flags (seen/keep) |
+| `DELETE` | `/messages` | 按账号批量软删（可选 `seen=true/false`）/ Bulk soft delete by account (optional seen filter) |
+| `POST` | `/messages/bulk-delete` | 按 ids 批量软删 / Bulk soft delete by IDs |
 | `GET` | `/messages/:id` | 邮件详情（含完整正文）/ Message detail (with full body) |
 | `PATCH` | `/messages/:id` | 更新邮件状态 / Update message status |
 | `DELETE` | `/messages/:id` | 删除邮件 / Delete message |
@@ -729,6 +736,28 @@ SMTP 服务支持同时在多个 IP 地址上监听。每个监听器知道自�
 **English:**
 
 The SMTP service supports listening on multiple IP addresses simultaneously. Each listener knows which domains it serves, performing domain filtering at the `RCPT TO` phase — domains not assigned to that listener are rejected with 550.
+
+### STARTTLS（可选）/ STARTTLS (Optional)
+
+MailAPI 基于 `go-smtp` 支持 STARTTLS（RFC 3207）：在 `server.smtp.tls.enabled=true` 时会在 `EHLO` capability 中广播 `STARTTLS`，并接受客户端升级到 TLS。
+
+配置项（`config.yaml`）：
+
+```yaml
+server:
+  smtp:
+    tls:
+      enabled: true
+      certFile: "certs/smtp.crt"   # 允许相对路径（相对 config.yaml 目录）
+      keyFile: "certs/smtp.key"
+      requireTLS: false            # true 时强制 MAIL/RCPT/DATA 前先 STARTTLS（否则 530）
+      minVersion: "1.2"            # 可选：1.2/1.3
+```
+
+注意事项：
+
+- `requireTLS=true` 会拒绝不支持 STARTTLS 的客户端（返回 `530 Must issue STARTTLS first`），可能影响可达性；默认建议保持 `false`。
+- 证书与私钥路径会在配置校验时做可读性检查；并支持按 config 文件目录解析相对路径，便于容器/打包部署。
 
 ### 监听器构建流程 / Listener Build Process
 

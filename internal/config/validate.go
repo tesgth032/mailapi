@@ -1,9 +1,11 @@
 package config
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"strings"
 )
 
@@ -116,6 +118,31 @@ func ValidateSMTPConfig(cfg *Config) error {
 	}
 	if cfg.Server.SMTP.MaxRecipients <= 0 {
 		return fmt.Errorf("server.smtp.maxRecipients must be > 0")
+	}
+
+	// SMTP TLS/STARTTLS（可选）
+	if cfg.Server.SMTP.TLS.RequireTLS && !cfg.Server.SMTP.TLS.Enabled {
+		return fmt.Errorf("server.smtp.tls.requireTLS requires server.smtp.tls.enabled=true")
+	}
+	if cfg.Server.SMTP.TLS.Enabled {
+		if strings.TrimSpace(cfg.Server.SMTP.TLS.CertFile) == "" {
+			return fmt.Errorf("server.smtp.tls.certFile is required when server.smtp.tls.enabled=true")
+		}
+		if strings.TrimSpace(cfg.Server.SMTP.TLS.KeyFile) == "" {
+			return fmt.Errorf("server.smtp.tls.keyFile is required when server.smtp.tls.enabled=true")
+		}
+		if s := strings.TrimSpace(cfg.Server.SMTP.TLS.MinVersion); s != "" {
+			if _, ok := ParseTLSMinVersion(s); !ok {
+				return fmt.Errorf("server.smtp.tls.minVersion must be 1.2 or 1.3, got %q", cfg.Server.SMTP.TLS.MinVersion)
+			}
+		}
+		// 提前检查文件可读性（不做更深的证书内容校验）。
+		if _, err := os.Stat(cfg.Server.SMTP.TLS.CertFile); err != nil {
+			return fmt.Errorf("server.smtp.tls.certFile not accessible: %v", err)
+		}
+		if _, err := os.Stat(cfg.Server.SMTP.TLS.KeyFile); err != nil {
+			return fmt.Errorf("server.smtp.tls.keyFile not accessible: %v", err)
+		}
 	}
 
 	return nil
@@ -269,4 +296,16 @@ func validateDialects(cfg *Config) error {
 	}
 
 	return nil
+}
+
+func ParseTLSMinVersion(s string) (uint16, bool) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	switch s {
+	case "1.2", "tls1.2", "tls12":
+		return tls.VersionTLS12, true
+	case "1.3", "tls1.3", "tls13":
+		return tls.VersionTLS13, true
+	default:
+		return 0, false
+	}
 }

@@ -25,32 +25,40 @@ func init() {
 // --- Mock Store ---
 
 type mockStore struct {
-	pingFunc                        func(ctx context.Context) error
-	listDomainsFunc                 func(ctx context.Context) ([]model.Domain, error)
-	getDomainByNameFunc             func(ctx context.Context, domain string) (*model.Domain, error)
-	createDomainFunc                func(ctx context.Context, domain *model.Domain) error
-	createAccountFunc               func(ctx context.Context, account *model.Account) error
-	getAccountFunc                  func(ctx context.Context, id string) (*model.Account, error)
-	getAccountIDByAddressFunc       func(ctx context.Context, address string) (bson.ObjectID, error)
-	getAccountByAddressFunc         func(ctx context.Context, address string) (*model.Account, error)
-	deleteAccountFunc               func(ctx context.Context, id string) error
-	updateAccountUsedFunc           func(ctx context.Context, id bson.ObjectID, delta int64) error
-	createMessageFunc               func(ctx context.Context, msg *model.Message) error
-	getMessageFunc                  func(ctx context.Context, id string) (*model.Message, error)
-	getMessageMetaFunc              func(ctx context.Context, id string) (*model.Message, error)
-	getMessageRawFunc               func(ctx context.Context, id string) (*model.Message, error)
-	hasMessageFunc                  func(ctx context.Context, id string) (bool, error)
-	hasMessageByIngestFunc          func(ctx context.Context, accountID bson.ObjectID, ingestStream string, ingestSeq int64) (bool, error)
-	existingMessageIDsFunc          func(ctx context.Context, ids []string) (map[string]struct{}, error)
-	listMessagesFunc                func(ctx context.Context, accountID bson.ObjectID, page, perPage int) ([]model.Message, int64, error)
-	listMessagesAfterFunc           func(ctx context.Context, accountID bson.ObjectID, cursorID string, limit int) ([]model.Message, int64, error)
-	updateMessageFlagsFunc          func(ctx context.Context, id string, seen, keep *bool) error
-	updateMessageSeenFunc           func(ctx context.Context, id string, seen bool) error
-	updateMessageKeepFunc           func(ctx context.Context, id string, keep bool) error
-	deleteMessageFunc               func(ctx context.Context, id string) error
-	hardDeleteMessagesByAccountFunc func(ctx context.Context, accountID bson.ObjectID) ([]model.Message, error)
-	countMessagesByAccountFunc      func(ctx context.Context, accountID bson.ObjectID) (int64, error)
-	closeFunc                       func(ctx context.Context) error
+	pingFunc                         func(ctx context.Context) error
+	listDomainsFunc                  func(ctx context.Context) ([]model.Domain, error)
+	getDomainByNameFunc              func(ctx context.Context, domain string) (*model.Domain, error)
+	createDomainFunc                 func(ctx context.Context, domain *model.Domain) error
+	createAccountFunc                func(ctx context.Context, account *model.Account) error
+	getAccountFunc                   func(ctx context.Context, id string) (*model.Account, error)
+	getAccountIDByAddressFunc        func(ctx context.Context, address string) (bson.ObjectID, error)
+	getAccountByAddressFunc          func(ctx context.Context, address string) (*model.Account, error)
+	deleteAccountFunc                func(ctx context.Context, id string) error
+	updateAccountUsedFunc            func(ctx context.Context, id bson.ObjectID, delta int64) error
+	tryReserveAccountUsedFunc        func(ctx context.Context, id bson.ObjectID, delta int64) (bool, error)
+	recalculateAccountUsedFunc       func(ctx context.Context, id bson.ObjectID) (int64, error)
+	createMessageFunc                func(ctx context.Context, msg *model.Message) error
+	getMessageFunc                   func(ctx context.Context, id string) (*model.Message, error)
+	getMessageMetaFunc               func(ctx context.Context, id string) (*model.Message, error)
+	getMessageRawFunc                func(ctx context.Context, id string) (*model.Message, error)
+	hasMessageFunc                   func(ctx context.Context, id string) (bool, error)
+	hasMessageByIngestFunc           func(ctx context.Context, accountID bson.ObjectID, ingestStream string, ingestSeq int64) (bool, error)
+	existingMessageIDsFunc           func(ctx context.Context, ids []string) (map[string]struct{}, error)
+	listMessagesFunc                 func(ctx context.Context, accountID bson.ObjectID, page, perPage int) ([]model.Message, int64, error)
+	listMessagesFilteredFunc         func(ctx context.Context, accountID bson.ObjectID, page, perPage int, seen *bool) ([]model.Message, int64, error)
+	listMessagesAfterFunc            func(ctx context.Context, accountID bson.ObjectID, cursorID string, limit int) ([]model.Message, int64, error)
+	listMessagesAfterFilteredFunc    func(ctx context.Context, accountID bson.ObjectID, cursorID string, limit int, seen *bool) ([]model.Message, int64, error)
+	updateMessageFlagsFunc           func(ctx context.Context, id string, seen, keep *bool) error
+	bulkUpdateMessageFlagsByIDsFunc  func(ctx context.Context, accountID bson.ObjectID, ids []string, seen, keep *bool) (int64, error)
+	bulkUpdateMessageFlagsByAcctFunc func(ctx context.Context, accountID bson.ObjectID, seen, keep *bool) (int64, error)
+	updateMessageSeenFunc            func(ctx context.Context, id string, seen bool) error
+	updateMessageKeepFunc            func(ctx context.Context, id string, keep bool) error
+	deleteMessageFunc                func(ctx context.Context, id string) error
+	softDeleteMessagesByAccountFunc  func(ctx context.Context, accountID bson.ObjectID, seen *bool, limit int) ([]string, int64, error)
+	softDeleteMessagesByIDsFunc      func(ctx context.Context, accountID bson.ObjectID, ids []string) ([]string, int64, error)
+	hardDeleteMessagesByAccountFunc  func(ctx context.Context, accountID bson.ObjectID) ([]model.Message, error)
+	countMessagesByAccountFunc       func(ctx context.Context, accountID bson.ObjectID) (int64, error)
+	closeFunc                        func(ctx context.Context) error
 }
 
 func (m *mockStore) Ping(ctx context.Context) error {
@@ -127,6 +135,20 @@ func (m *mockStore) UpdateAccountUsed(ctx context.Context, id bson.ObjectID, del
 	return nil
 }
 
+func (m *mockStore) TryReserveAccountUsed(ctx context.Context, id bson.ObjectID, delta int64) (bool, error) {
+	if m.tryReserveAccountUsedFunc != nil {
+		return m.tryReserveAccountUsedFunc(ctx, id, delta)
+	}
+	return true, nil
+}
+
+func (m *mockStore) RecalculateAccountUsed(ctx context.Context, id bson.ObjectID) (int64, error) {
+	if m.recalculateAccountUsedFunc != nil {
+		return m.recalculateAccountUsedFunc(ctx, id)
+	}
+	return 0, nil
+}
+
 func (m *mockStore) CreateMessage(ctx context.Context, msg *model.Message) error {
 	if m.createMessageFunc != nil {
 		return m.createMessageFunc(ctx, msg)
@@ -187,11 +209,26 @@ func (m *mockStore) ListMessages(ctx context.Context, accountID bson.ObjectID, p
 	return []model.Message{}, 0, nil
 }
 
+func (m *mockStore) ListMessagesFiltered(ctx context.Context, accountID bson.ObjectID, page, perPage int, seen *bool) ([]model.Message, int64, error) {
+	if m.listMessagesFilteredFunc != nil {
+		return m.listMessagesFilteredFunc(ctx, accountID, page, perPage, seen)
+	}
+	// 默认回退到未筛选版本（保持旧测试/调用简单）。
+	return m.ListMessages(ctx, accountID, page, perPage)
+}
+
 func (m *mockStore) ListMessagesAfter(ctx context.Context, accountID bson.ObjectID, cursorID string, limit int) ([]model.Message, int64, error) {
 	if m.listMessagesAfterFunc != nil {
 		return m.listMessagesAfterFunc(ctx, accountID, cursorID, limit)
 	}
 	return []model.Message{}, 0, nil
+}
+
+func (m *mockStore) ListMessagesAfterFiltered(ctx context.Context, accountID bson.ObjectID, cursorID string, limit int, seen *bool) ([]model.Message, int64, error) {
+	if m.listMessagesAfterFilteredFunc != nil {
+		return m.listMessagesAfterFilteredFunc(ctx, accountID, cursorID, limit, seen)
+	}
+	return m.ListMessagesAfter(ctx, accountID, cursorID, limit)
 }
 
 func (m *mockStore) UpdateMessageFlags(ctx context.Context, id string, seen, keep *bool) error {
@@ -209,6 +246,20 @@ func (m *mockStore) UpdateMessageFlags(ctx context.Context, id string, seen, kee
 		}
 	}
 	return nil
+}
+
+func (m *mockStore) BulkUpdateMessageFlagsByIDs(ctx context.Context, accountID bson.ObjectID, ids []string, seen, keep *bool) (int64, error) {
+	if m.bulkUpdateMessageFlagsByIDsFunc != nil {
+		return m.bulkUpdateMessageFlagsByIDsFunc(ctx, accountID, ids, seen, keep)
+	}
+	return 0, nil
+}
+
+func (m *mockStore) BulkUpdateMessageFlagsByAccount(ctx context.Context, accountID bson.ObjectID, seen, keep *bool) (int64, error) {
+	if m.bulkUpdateMessageFlagsByAcctFunc != nil {
+		return m.bulkUpdateMessageFlagsByAcctFunc(ctx, accountID, seen, keep)
+	}
+	return 0, nil
 }
 
 func (m *mockStore) UpdateMessageSeen(ctx context.Context, id string, seen bool) error {
@@ -230,6 +281,20 @@ func (m *mockStore) DeleteMessage(ctx context.Context, id string) error {
 		return m.deleteMessageFunc(ctx, id)
 	}
 	return nil
+}
+
+func (m *mockStore) SoftDeleteMessagesByAccount(ctx context.Context, accountID bson.ObjectID, seen *bool, limit int) ([]string, int64, error) {
+	if m.softDeleteMessagesByAccountFunc != nil {
+		return m.softDeleteMessagesByAccountFunc(ctx, accountID, seen, limit)
+	}
+	return []string{}, 0, nil
+}
+
+func (m *mockStore) SoftDeleteMessagesByIDs(ctx context.Context, accountID bson.ObjectID, ids []string) ([]string, int64, error) {
+	if m.softDeleteMessagesByIDsFunc != nil {
+		return m.softDeleteMessagesByIDsFunc(ctx, accountID, ids)
+	}
+	return []string{}, 0, nil
 }
 
 func (m *mockStore) HardDeleteMessagesByAccount(ctx context.Context, accountID bson.ObjectID) ([]model.Message, error) {

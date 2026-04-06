@@ -10,6 +10,7 @@ import (
 
 	"mailapi/internal/model"
 	"mailapi/internal/queue"
+	"mailapi/internal/store"
 
 	gosmtp "github.com/emersion/go-smtp"
 	"github.com/redis/go-redis/v9"
@@ -125,6 +126,17 @@ func newTestSession(cache *mockSMTPCache, queue *mockSMTPQueue) *Session {
 	}
 }
 
+type mockRecipientLookup struct {
+	getAccountByAddressFunc func(ctx context.Context, address string) (*model.Account, error)
+}
+
+func (m *mockRecipientLookup) GetAccountByAddress(ctx context.Context, address string) (*model.Account, error) {
+	if m.getAccountByAddressFunc != nil {
+		return m.getAccountByAddressFunc(ctx, address)
+	}
+	return nil, store.ErrNotFound
+}
+
 func TestSession_AuthPlain(t *testing.T) {
 	s := newTestSession(&mockSMTPCache{}, &mockSMTPQueue{})
 	if err := s.AuthPlain("user", "pass"); err != nil {
@@ -203,6 +215,64 @@ func TestSession_Rcpt_CacheError(t *testing.T) {
 	}
 	if smtpErr.Code != 451 {
 		t.Errorf("SMTP code = %d, want 451", smtpErr.Code)
+	}
+}
+
+func TestSession_Rcpt_RedisMiss_FallbackLookup_WarmsRedis(t *testing.T) {
+	var warmedAddr string
+	mc := &mockSMTPCache{
+		hasAddressFunc: func(ctx context.Context, addr string) (bool, error) {
+			return false, nil
+		},
+		setAddressFunc: func(ctx context.Context, addr string, ttl time.Duration) error {
+			warmedAddr = addr
+			return nil
+		},
+	}
+	lookup := &mockRecipientLookup{
+		getAccountByAddressFunc: func(ctx context.Context, address string) (*model.Account, error) {
+			return &model.Account{Address: address, CreatedAt: time.Now().Add(-time.Hour)}, nil
+		},
+	}
+	b := NewBackend(mc, &mockSMTPQueue{}, lookup, 24*time.Hour, "test.example.com", nil, 20<<20)
+	s := &Session{backend: b, remoteAddr: "127.0.0.1:12345"}
+
+	err := s.Rcpt("User@Example.COM", &gosmtp.RcptOptions{})
+	if err != nil {
+		t.Fatalf("Rcpt: %v", err)
+	}
+	if len(s.to) != 1 || s.to[0] != "user@example.com" {
+		t.Fatalf("to=%v want [user@example.com]", s.to)
+	}
+	if warmedAddr != "user@example.com" {
+		t.Fatalf("warmedAddr=%q want %q", warmedAddr, "user@example.com")
+	}
+}
+
+func TestSession_Rcpt_RedisMiss_FallbackNotFound(t *testing.T) {
+	mc := &mockSMTPCache{
+		hasAddressFunc: func(ctx context.Context, addr string) (bool, error) {
+			return false, nil
+		},
+	}
+	lookup := &mockRecipientLookup{
+		getAccountByAddressFunc: func(ctx context.Context, address string) (*model.Account, error) {
+			return nil, store.ErrNotFound
+		},
+	}
+	b := NewBackend(mc, &mockSMTPQueue{}, lookup, 24*time.Hour, "test.example.com", nil, 20<<20)
+	s := &Session{backend: b, remoteAddr: "127.0.0.1:12345"}
+
+	err := s.Rcpt("unknown@example.com", &gosmtp.RcptOptions{})
+	if err == nil {
+		t.Fatal("expected error for unknown recipient")
+	}
+	var smtpErr *gosmtp.SMTPError
+	if !errors.As(err, &smtpErr) {
+		t.Fatalf("expected SMTPError, got %T", err)
+	}
+	if smtpErr.Code != 550 {
+		t.Errorf("SMTP code = %d, want 550", smtpErr.Code)
 	}
 }
 

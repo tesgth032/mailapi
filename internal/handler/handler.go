@@ -67,18 +67,18 @@ func New(s store.Interface, c cache.Interface, st storage.Interface, a *auth.Aut
 	}
 
 	return &Handler{
-		store:      s,
-		cache:      c,
-		storage:    st,
-		auth:       a,
-		accountTTL: accountTTL,
-		apiKeys:    apiKeys,
-		prefix:     pg,
-		globalRPM:  rpm,
-		bcryptSem:  make(chan struct{}, maxBcrypt),
+		store:             s,
+		cache:             c,
+		storage:           st,
+		auth:              a,
+		accountTTL:        accountTTL,
+		apiKeys:           apiKeys,
+		prefix:            pg,
+		globalRPM:         rpm,
+		bcryptSem:         make(chan struct{}, maxBcrypt),
 		storageCleanupSem: make(chan struct{}, maxCleanup),
-		allowMessageKeep: allowMessageKeep,
-		sseHub:           newSSEHub(c),
+		allowMessageKeep:  allowMessageKeep,
+		sseHub:            newSSEHub(c),
 	}
 }
 
@@ -108,6 +108,9 @@ func (h *Handler) SetupRoutes(r *gin.Engine) {
 		authed.DELETE("/accounts/:id", h.DeleteAccount)
 
 		authed.GET("/messages", h.ListMessages)
+		authed.PATCH("/messages", h.BulkUpdateMessages)
+		authed.DELETE("/messages", h.DeleteMessages)
+		authed.POST("/messages/bulk-delete", h.BulkDeleteMessagesByIDs)
 		authed.GET("/messages/:id", h.GetMessage)
 		authed.PATCH("/messages/:id", h.UpdateMessage)
 		authed.DELETE("/messages/:id", h.DeleteMessage)

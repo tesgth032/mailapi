@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"mailapi/internal/middleware"
 	"mailapi/internal/model"
 	"mailapi/internal/store"
 
@@ -88,6 +89,53 @@ func TestCreateAccount_DomainNotFound(t *testing.T) {
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestCreateAccount_PrivateDomainRequiresExplicitAuthorization(t *testing.T) {
+	ms := &mockStore{
+		listDomainsFunc: func(ctx context.Context) ([]model.Domain, error) {
+			return []model.Domain{{Domain: "private.com", IsActive: true, IsPrivate: true}}, nil
+		},
+	}
+	h := newTestHandler(ms, &mockCache{}, &mockStorage{})
+
+	body := `{"address":"user@private.com","password":"secret123"}`
+	c, w := newTestContext("POST", "/accounts", []byte(body))
+	h.CreateAccount(c)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+}
+
+func TestCreateAccount_PrivateDomainExplicitAuthorization_Success(t *testing.T) {
+	ms := &mockStore{
+		listDomainsFunc: func(ctx context.Context) ([]model.Domain, error) {
+			return []model.Domain{{Domain: "private.com", IsActive: true, IsPrivate: true}}, nil
+		},
+		createAccountFunc: func(ctx context.Context, account *model.Account) error {
+			account.ID = bson.NewObjectID()
+			return nil
+		},
+	}
+	h := newTestHandler(ms, &mockCache{}, &mockStorage{})
+
+	body := `{"address":"user@private.com","password":"secret123"}`
+	c, w := newTestContext("POST", "/accounts", []byte(body))
+	// 模拟 wildcard API key，但显式授权 private.com。
+	c.Set(middleware.CtxAPIKeyInfo, &middleware.APIKeyInfo{
+		Name:      "Test",
+		Domains:   []string{"*"},
+		DomainSet: map[string]struct{}{"private.com": {}},
+		Wildcard:  true,
+	})
+	c.Set(middleware.CtxAPIKeyDomains, []string{"*"})
+
+	h.CreateAccount(c)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body: %s", w.Code, http.StatusCreated, w.Body.String())
 	}
 }
 

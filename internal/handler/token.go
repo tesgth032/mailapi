@@ -29,6 +29,20 @@ func (h *Handler) CreateToken(c *gin.Context) {
 		return
 	}
 
+	di, err := h.getDomainInfo(c.Request.Context(), domain)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "domain not available"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "internal error"})
+		return
+	}
+	if di.IsPrivate && !middleware.IsDomainExplicitlyAllowed(c, domain) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "private domain requires explicit API key authorization"})
+		return
+	}
+
 	account, err := h.store.GetAccountByAddress(c.Request.Context(), req.Address)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {

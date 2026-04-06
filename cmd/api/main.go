@@ -147,7 +147,7 @@ func main() {
 		// 归一化 domains 与 domainLimits：避免大小写/空格导致“看似配置了却不生效”。
 		// 约定：域名匹配大小写不敏感，统一转小写。
 		wildcard := false
-		domains := make([]string, 0, len(ak.Domains))
+		explicitDomains := make([]string, 0, len(ak.Domains))
 		for _, d := range ak.Domains {
 			dd := strings.ToLower(strings.TrimSpace(d))
 			if dd == "" {
@@ -157,17 +157,22 @@ func main() {
 				wildcard = true
 				continue
 			}
-			domains = append(domains, dd)
+			explicitDomains = append(explicitDomains, dd)
 		}
 
 		var domainSet map[string]struct{}
-		if wildcard {
-			domains = []string{"*"}
-		} else if len(domains) > 0 {
-			domainSet = make(map[string]struct{}, len(domains))
-			for _, d := range domains {
+		if len(explicitDomains) > 0 {
+			domainSet = make(map[string]struct{}, len(explicitDomains))
+			for _, d := range explicitDomains {
 				domainSet[d] = struct{}{}
 			}
+		}
+
+		// 兼容旧语义：BearerAuth 往 ctx 里放的 allowed-domains 仍只用 "*" 表示 wildcard。
+		// 同时保留 DomainSet 作为“显式授权域名集合”，用于私有域名等需要显式授权的场景。
+		domains := explicitDomains
+		if wildcard {
+			domains = []string{"*"}
 		}
 
 		var domainLimits map[string]int64

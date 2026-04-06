@@ -17,6 +17,9 @@ func TestCreateToken_Success(t *testing.T) {
 	oid := bson.NewObjectID()
 	hashed, _ := bcrypt.GenerateFromPassword([]byte("secret123"), bcrypt.MinCost)
 	ms := &mockStore{
+		listDomainsFunc: func(ctx context.Context) ([]model.Domain, error) {
+			return []model.Domain{{Domain: "example.com", IsActive: true}}, nil
+		},
 		getAccountByAddressFunc: func(ctx context.Context, address string) (*model.Account, error) {
 			return &model.Account{
 				ID:       oid,
@@ -50,6 +53,9 @@ func TestCreateToken_NormalizesAddress(t *testing.T) {
 	oid := bson.NewObjectID()
 	hashed, _ := bcrypt.GenerateFromPassword([]byte("secret123"), bcrypt.MinCost)
 	ms := &mockStore{
+		listDomainsFunc: func(ctx context.Context) ([]model.Domain, error) {
+			return []model.Domain{{Domain: "example.com", IsActive: true}}, nil
+		},
 		getAccountByAddressFunc: func(ctx context.Context, address string) (*model.Account, error) {
 			gotAddr = address
 			return &model.Account{
@@ -98,6 +104,9 @@ func TestCreateToken_MissingPassword(t *testing.T) {
 
 func TestCreateToken_AccountNotFound(t *testing.T) {
 	ms := &mockStore{
+		listDomainsFunc: func(ctx context.Context) ([]model.Domain, error) {
+			return []model.Domain{{Domain: "example.com", IsActive: true}}, nil
+		},
 		getAccountByAddressFunc: func(ctx context.Context, address string) (*model.Account, error) {
 			return nil, store.ErrNotFound
 		},
@@ -116,6 +125,9 @@ func TestCreateToken_AccountNotFound(t *testing.T) {
 func TestCreateToken_WrongPassword(t *testing.T) {
 	hashed, _ := bcrypt.GenerateFromPassword([]byte("correct-password"), bcrypt.MinCost)
 	ms := &mockStore{
+		listDomainsFunc: func(ctx context.Context) ([]model.Domain, error) {
+			return []model.Domain{{Domain: "example.com", IsActive: true}}, nil
+		},
 		getAccountByAddressFunc: func(ctx context.Context, address string) (*model.Account, error) {
 			return &model.Account{
 				ID:       bson.NewObjectID(),
@@ -139,6 +151,9 @@ func TestCreateToken_ResponseFormat(t *testing.T) {
 	oid := bson.NewObjectID()
 	hashed, _ := bcrypt.GenerateFromPassword([]byte("pass123456"), bcrypt.MinCost)
 	ms := &mockStore{
+		listDomainsFunc: func(ctx context.Context) ([]model.Domain, error) {
+			return []model.Domain{{Domain: "example.com", IsActive: true}}, nil
+		},
 		getAccountByAddressFunc: func(ctx context.Context, address string) (*model.Account, error) {
 			return &model.Account{ID: oid, Address: address, Password: string(hashed)}, nil
 		},

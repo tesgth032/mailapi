@@ -220,6 +220,11 @@ func (s *Store) ensureIndexes(ctx context.Context, accountTTL, messageTTL time.D
 		return err
 	}
 
+	// Messages: compound index with seen filter (common query pattern: /messages?seen=true/false)
+	if err := ensureIndex(ctx, s.messages, bson.D{{Key: "accountId", Value: 1}, {Key: "isDeleted", Value: 1}, {Key: "seen", Value: 1}, {Key: "createdAt", Value: -1}, {Key: "_id", Value: -1}}); err != nil {
+		return err
+	}
+
 	// Messages: drop legacy index without _id if present (new compound covers it).
 	if err := dropIndexByKeysIfExists(ctx, s.messages, bson.D{{Key: "accountId", Value: 1}, {Key: "isDeleted", Value: 1}, {Key: "createdAt", Value: -1}}); err != nil {
 		return err
@@ -230,9 +235,15 @@ func (s *Store) ensureIndexes(ctx context.Context, accountTTL, messageTTL time.D
 		return err
 	}
 
+	// Messages: 将历史上缺失 keep 字段的文档补齐为 keep=false，确保 TTL partial index
+	// 在各 MongoDB 版本上都能稳定工作（Mongo 不支持在 partial index 里使用 $ne）。
+	if err := normalizeMissingMessageKeep(ctx, s.messages); err != nil {
+		return err
+	}
+
 	// Messages: TTL index (可配置；允许在不重建索引的情况下更新 expireAfterSeconds)
-	// keep=true 的消息不会过期（长期保留），通过 partialFilterExpression 实现。
-	if err := ensureTTLIndex(ctx, s.db, s.messages, "messages", bson.D{{Key: "createdAt", Value: 1}}, messageTTL, bson.M{"keep": bson.M{"$ne": true}}); err != nil {
+	// keep=true 的消息不会过期（长期保留），keep=false 的消息继续走 TTL 自动过期。
+	if err := ensureTTLIndex(ctx, s.db, s.messages, "messages", bson.D{{Key: "createdAt", Value: 1}}, messageTTL, messageKeepTTLPartialFilter()); err != nil {
 		return err
 	}
 
@@ -466,6 +477,19 @@ func partialFilterEqual(a, b bson.M) bool {
 		b = nil
 	}
 	return reflect.DeepEqual(a, b)
+}
+
+func messageKeepTTLPartialFilter() bson.M {
+	return bson.M{"keep": false}
+}
+
+func normalizeMissingMessageKeep(ctx context.Context, coll *mongo.Collection) error {
+	_, err := coll.UpdateMany(
+		ctx,
+		bson.M{"keep": bson.M{"$exists": false}},
+		bson.M{"$set": bson.M{"keep": false}},
+	)
+	return err
 }
 
 func ensureTTLIndex(ctx context.Context, db *mongo.Database, coll *mongo.Collection, collName string, keys bson.D, ttl time.Duration, partial bson.M) error {
@@ -747,11 +771,104 @@ func (s *Store) DeleteAccount(ctx context.Context, id string) error {
 }
 
 func (s *Store) UpdateAccountUsed(ctx context.Context, id bson.ObjectID, delta int64) error {
-	_, err := s.accounts.UpdateOne(ctx, bson.M{"_id": id}, bson.M{
-		"$inc": bson.M{"used": delta},
-		"$set": bson.M{"updatedAt": time.Now()},
-	})
+	// used 允许在异常/回滚时做负向修正，但必须保证最终不小于 0。
+	// 这里使用 update pipeline（MongoDB 4.2+）实现 $max(0, used+delta) 的原子更新。
+	now := time.Now()
+
+	// delta==0 仅更新时间戳，避免 pipeline 带来的额外开销。
+	if delta == 0 {
+		_, err := s.accounts.UpdateOne(ctx, bson.M{"_id": id}, bson.M{"$set": bson.M{"updatedAt": now}})
+		return err
+	}
+
+	update := mongo.Pipeline{
+		bson.D{{Key: "$set", Value: bson.M{
+			"used": bson.M{
+				"$max": []any{
+					int64(0),
+					bson.M{"$add": []any{
+						bson.M{"$ifNull": []any{"$used", int64(0)}},
+						delta,
+					}},
+				},
+			},
+			"updatedAt": now,
+		}}},
+	}
+
+	_, err := s.accounts.UpdateOne(ctx, bson.M{"_id": id}, update)
 	return err
+}
+
+func (s *Store) TryReserveAccountUsed(ctx context.Context, id bson.ObjectID, delta int64) (bool, error) {
+	if delta <= 0 {
+		return true, nil
+	}
+
+	now := time.Now()
+	filter := bson.M{
+		"_id": id,
+		"$or": []bson.M{
+			// quota<=0 视为不限额
+			{"quota": bson.M{"$lte": 0}},
+			// used+delta <= quota
+			{"$expr": bson.M{"$lte": []any{
+				bson.M{"$add": []any{
+					bson.M{"$ifNull": []any{"$used", int64(0)}},
+					delta,
+				}},
+				"$quota",
+			}}},
+		},
+	}
+	update := bson.M{
+		"$inc": bson.M{"used": delta},
+		"$set": bson.M{"updatedAt": now},
+	}
+
+	res, err := s.accounts.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return false, err
+	}
+	return res.MatchedCount > 0, nil
+}
+
+func (s *Store) RecalculateAccountUsed(ctx context.Context, id bson.ObjectID) (int64, error) {
+	// 只统计未软删除消息；用于 TTL 自动删除/异常回滚导致 used 漂移的纠偏。
+	pipeline := mongo.Pipeline{
+		bson.D{{Key: "$match", Value: bson.M{"accountId": id, "isDeleted": false}}},
+		bson.D{{Key: "$group", Value: bson.M{"_id": nil, "used": bson.M{"$sum": bson.M{"$ifNull": []any{"$size", int64(0)}}}}}},
+	}
+
+	cur, err := s.messages.Aggregate(ctx, pipeline)
+	if err != nil {
+		return 0, err
+	}
+	defer cur.Close(ctx)
+
+	var out struct {
+		Used int64 `bson:"used"`
+	}
+	used := int64(0)
+	if cur.Next(ctx) {
+		if err := cur.Decode(&out); err != nil {
+			return 0, err
+		}
+		used = out.Used
+	}
+	if err := cur.Err(); err != nil {
+		return 0, err
+	}
+	if used < 0 {
+		used = 0
+	}
+
+	// 写回 accounts.used（如果账号不存在，MatchedCount=0；调用方可按需处理）
+	_, err = s.accounts.UpdateOne(ctx, bson.M{"_id": id}, bson.M{"$set": bson.M{"used": used, "updatedAt": time.Now()}})
+	if err != nil {
+		return 0, err
+	}
+	return used, nil
 }
 
 // --- Message Operations ---
@@ -962,6 +1079,69 @@ func (s *Store) ListMessages(ctx context.Context, accountID bson.ObjectID, page,
 	}
 }
 
+func (s *Store) ListMessagesFiltered(ctx context.Context, accountID bson.ObjectID, page, perPage int, seen *bool) ([]model.Message, int64, error) {
+	if seen == nil {
+		return s.ListMessages(ctx, accountID, page, perPage)
+	}
+
+	type result struct {
+		messages []model.Message
+		total    int64
+	}
+
+	key := accountID.Hex() + ":seen:" + strconv.FormatBool(*seen) + ":p:" + strconv.Itoa(page) + ":n:" + strconv.Itoa(perPage)
+	ch := s.listMessagesSF.DoChan(key, func() (any, error) {
+		qCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		total, err := s.countMessagesCachedWithFilter(qCtx, accountID, seen)
+		if err != nil {
+			return nil, err
+		}
+
+		filter := bson.M{"accountId": accountID, "isDeleted": false, "seen": *seen}
+		skip := int64((page - 1) * perPage)
+		opts := options.Find().
+			SetSort(bson.D{{Key: "createdAt", Value: -1}, {Key: "_id", Value: -1}}).
+			SetSkip(skip).
+			SetLimit(int64(perPage)).
+			SetProjection(bson.M{"rawMessage": 0, "text": 0, "html": 0})
+
+		cursor, err := s.messages.Find(qCtx, filter, opts)
+		if err != nil {
+			return nil, err
+		}
+		defer cursor.Close(qCtx)
+
+		var messages []model.Message
+		if err := cursor.All(qCtx, &messages); err != nil {
+			return nil, err
+		}
+		if messages == nil {
+			messages = []model.Message{}
+		}
+		return &result{messages: messages, total: total}, nil
+	})
+
+	select {
+	case <-ctx.Done():
+		return nil, 0, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, 0, res.Err
+		}
+		r, ok := res.Val.(*result)
+		if !ok || r == nil {
+			return nil, 0, fmt.Errorf("unexpected list result type %T", res.Val)
+		}
+		out := append([]model.Message(nil), r.messages...)
+		if out == nil {
+			out = []model.Message{}
+		}
+		return out, r.total, nil
+	}
+}
+
 func (s *Store) ListMessagesAfter(ctx context.Context, accountID bson.ObjectID, cursorID string, limit int) ([]model.Message, int64, error) {
 	type result struct {
 		messages []model.Message
@@ -1022,6 +1202,116 @@ func (s *Store) ListMessagesAfter(ctx context.Context, accountID bson.ObjectID, 
 				filter = bson.M{
 					"accountId": accountID,
 					"isDeleted": false,
+					"$or": bson.A{
+						bson.M{"createdAt": bson.M{"$lt": cur.CreatedAt}},
+						bson.M{"createdAt": cur.CreatedAt, "_id": bson.M{"$lt": coid}},
+					},
+				}
+			}
+		}
+
+		opts := options.Find().
+			SetSort(bson.D{{Key: "createdAt", Value: -1}, {Key: "_id", Value: -1}}).
+			SetLimit(int64(limit)).
+			SetProjection(bson.M{"rawMessage": 0, "text": 0, "html": 0})
+
+		cursor, err := s.messages.Find(qCtx, filter, opts)
+		if err != nil {
+			return nil, err
+		}
+		defer cursor.Close(qCtx)
+
+		var messages []model.Message
+		if err := cursor.All(qCtx, &messages); err != nil {
+			return nil, err
+		}
+		if messages == nil {
+			messages = []model.Message{}
+		}
+		return &result{messages: messages, total: total}, nil
+	})
+
+	select {
+	case <-ctx.Done():
+		return nil, 0, ctx.Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, 0, res.Err
+		}
+		r, ok := res.Val.(*result)
+		if !ok || r == nil {
+			return nil, 0, fmt.Errorf("unexpected list result type %T", res.Val)
+		}
+		out := append([]model.Message(nil), r.messages...)
+		if out == nil {
+			out = []model.Message{}
+		}
+		return out, r.total, nil
+	}
+}
+
+func (s *Store) ListMessagesAfterFiltered(ctx context.Context, accountID bson.ObjectID, cursorID string, limit int, seen *bool) ([]model.Message, int64, error) {
+	if seen == nil {
+		return s.ListMessagesAfter(ctx, accountID, cursorID, limit)
+	}
+
+	type result struct {
+		messages []model.Message
+		total    int64
+	}
+
+	cursorID = strings.TrimSpace(cursorID)
+	if limit <= 0 {
+		limit = 30
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	key := accountID.Hex() + ":seen:" + strconv.FormatBool(*seen) + ":c:" + cursorID + ":l:" + strconv.Itoa(limit)
+	ch := s.listMessagesSF.DoChan(key, func() (any, error) {
+		qCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		total, err := s.countMessagesCachedWithFilter(qCtx, accountID, seen)
+		if err != nil {
+			return nil, err
+		}
+
+		filter := bson.M{"accountId": accountID, "isDeleted": false, "seen": *seen}
+		if cursorID != "" {
+			if ts, coid, ok := parseCursorToken(cursorID); ok {
+				filter = bson.M{
+					"accountId": accountID,
+					"isDeleted": false,
+					"seen":      *seen,
+					"$or": bson.A{
+						bson.M{"createdAt": bson.M{"$lt": ts}},
+						bson.M{"createdAt": ts, "_id": bson.M{"$lt": coid}},
+					},
+				}
+			} else {
+				coid, err := bson.ObjectIDFromHex(cursorID)
+				if err != nil {
+					return nil, ErrInvalidID
+				}
+
+				var cur struct {
+					CreatedAt time.Time `bson:"createdAt"`
+				}
+				curOpts := options.FindOne().SetProjection(bson.M{"createdAt": 1})
+				err = s.messages.FindOne(qCtx, bson.M{"_id": coid, "accountId": accountID, "isDeleted": false, "seen": *seen}, curOpts).Decode(&cur)
+				if errors.Is(err, mongo.ErrNoDocuments) {
+					return nil, ErrNotFound
+				}
+				if err != nil {
+					return nil, err
+				}
+
+				filter = bson.M{
+					"accountId": accountID,
+					"isDeleted": false,
+					"seen":      *seen,
 					"$or": bson.A{
 						bson.M{"createdAt": bson.M{"$lt": cur.CreatedAt}},
 						bson.M{"createdAt": cur.CreatedAt, "_id": bson.M{"$lt": coid}},
@@ -1132,6 +1422,64 @@ func (s *Store) UpdateMessageFlags(ctx context.Context, id string, seen, keep *b
 	return nil
 }
 
+func (s *Store) BulkUpdateMessageFlagsByIDs(ctx context.Context, accountID bson.ObjectID, ids []string, seen, keep *bool) (int64, error) {
+	if seen == nil && keep == nil {
+		return 0, nil
+	}
+	if len(ids) == 0 {
+		return 0, nil
+	}
+
+	oids := make([]bson.ObjectID, 0, len(ids))
+	for _, id := range ids {
+		oid, err := bson.ObjectIDFromHex(strings.TrimSpace(id))
+		if err != nil {
+			return 0, ErrInvalidID
+		}
+		oids = append(oids, oid)
+	}
+
+	set := bson.M{"updatedAt": time.Now()}
+	if seen != nil {
+		set["seen"] = *seen
+	}
+	if keep != nil {
+		set["keep"] = *keep
+	}
+
+	filter := bson.M{"_id": bson.M{"$in": oids}, "accountId": accountID, "isDeleted": false}
+	res, err := s.messages.UpdateMany(ctx, filter, bson.M{"$set": set})
+	if err != nil {
+		return 0, err
+	}
+	return res.ModifiedCount, nil
+}
+
+func (s *Store) BulkUpdateMessageFlagsByAccount(ctx context.Context, accountID bson.ObjectID, seen, keep *bool) (int64, error) {
+	if seen == nil && keep == nil {
+		return 0, nil
+	}
+
+	set := bson.M{"updatedAt": time.Now()}
+	filter := bson.M{"accountId": accountID, "isDeleted": false}
+
+	// 避免无意义写放大：仅更新“确实需要变更”的文档。
+	if seen != nil {
+		set["seen"] = *seen
+		filter["seen"] = bson.M{"$ne": *seen}
+	}
+	if keep != nil {
+		set["keep"] = *keep
+		filter["keep"] = bson.M{"$ne": *keep}
+	}
+
+	res, err := s.messages.UpdateMany(ctx, filter, bson.M{"$set": set})
+	if err != nil {
+		return 0, err
+	}
+	return res.ModifiedCount, nil
+}
+
 func (s *Store) DeleteMessage(ctx context.Context, id string) error {
 	oid, err := bson.ObjectIDFromHex(id)
 	if err != nil {
@@ -1147,6 +1495,134 @@ func (s *Store) DeleteMessage(ctx context.Context, id string) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+func (s *Store) SoftDeleteMessagesByAccount(ctx context.Context, accountID bson.ObjectID, seen *bool, limit int) ([]string, int64, error) {
+	if limit <= 0 {
+		limit = 5000
+	}
+	if limit > 20000 {
+		limit = 20000
+	}
+
+	filter := bson.M{"accountId": accountID, "isDeleted": false}
+	if seen != nil {
+		filter["seen"] = *seen
+	}
+
+	type meta struct {
+		ID   bson.ObjectID `bson:"_id"`
+		Size int64         `bson:"size"`
+	}
+
+	capHint := limit
+	if capHint > 4096 {
+		capHint = 4096
+	}
+	deleted := make([]string, 0, capHint)
+	var totalSize int64
+
+	remaining := limit
+	for remaining > 0 {
+		batch := 1000
+		if batch > remaining {
+			batch = remaining
+		}
+
+		opts := options.Find().
+			SetSort(bson.D{{Key: "createdAt", Value: -1}, {Key: "_id", Value: -1}}).
+			SetLimit(int64(batch)).
+			SetProjection(bson.M{"_id": 1, "size": 1})
+
+		cur, err := s.messages.Find(ctx, filter, opts)
+		if err != nil {
+			return nil, 0, err
+		}
+
+		var docs []meta
+		if err := cur.All(ctx, &docs); err != nil {
+			_ = cur.Close(ctx)
+			return nil, 0, err
+		}
+		_ = cur.Close(ctx)
+
+		if len(docs) == 0 {
+			break
+		}
+
+		oids := make([]bson.ObjectID, 0, len(docs))
+		for _, d := range docs {
+			oids = append(oids, d.ID)
+			deleted = append(deleted, d.ID.Hex())
+			totalSize += d.Size
+		}
+
+		updFilter := bson.M{"_id": bson.M{"$in": oids}, "accountId": accountID, "isDeleted": false}
+		_, err = s.messages.UpdateMany(ctx, updFilter, bson.M{"$set": bson.M{"isDeleted": true, "updatedAt": time.Now()}})
+		if err != nil {
+			return nil, 0, err
+		}
+
+		remaining -= len(docs)
+	}
+
+	if deleted == nil {
+		deleted = []string{}
+	}
+	return deleted, totalSize, nil
+}
+
+func (s *Store) SoftDeleteMessagesByIDs(ctx context.Context, accountID bson.ObjectID, ids []string) ([]string, int64, error) {
+	if len(ids) == 0 {
+		return []string{}, 0, nil
+	}
+
+	oids := make([]bson.ObjectID, 0, len(ids))
+	for _, id := range ids {
+		oid, err := bson.ObjectIDFromHex(strings.TrimSpace(id))
+		if err != nil {
+			return nil, 0, ErrInvalidID
+		}
+		oids = append(oids, oid)
+	}
+
+	type meta struct {
+		ID   bson.ObjectID `bson:"_id"`
+		Size int64         `bson:"size"`
+	}
+
+	filter := bson.M{"_id": bson.M{"$in": oids}, "accountId": accountID, "isDeleted": false}
+	opts := options.Find().SetProjection(bson.M{"_id": 1, "size": 1})
+	cur, err := s.messages.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer cur.Close(ctx)
+
+	var docs []meta
+	if err := cur.All(ctx, &docs); err != nil {
+		return nil, 0, err
+	}
+	if len(docs) == 0 {
+		return []string{}, 0, nil
+	}
+
+	found := make([]bson.ObjectID, 0, len(docs))
+	deleted := make([]string, 0, len(docs))
+	var totalSize int64
+	for _, d := range docs {
+		found = append(found, d.ID)
+		deleted = append(deleted, d.ID.Hex())
+		totalSize += d.Size
+	}
+
+	updFilter := bson.M{"_id": bson.M{"$in": found}, "accountId": accountID, "isDeleted": false}
+	_, err = s.messages.UpdateMany(ctx, updFilter, bson.M{"$set": bson.M{"isDeleted": true, "updatedAt": time.Now()}})
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return deleted, totalSize, nil
 }
 
 func (s *Store) HardDeleteMessagesByAccount(ctx context.Context, accountID bson.ObjectID) ([]model.Message, error) {
@@ -1186,11 +1662,20 @@ const (
 )
 
 func (s *Store) countMessagesCached(ctx context.Context, accountID bson.ObjectID) (int64, error) {
+	return s.countMessagesCachedWithFilter(ctx, accountID, nil)
+}
+
+func (s *Store) countMessagesCachedWithFilter(ctx context.Context, accountID bson.ObjectID, seen *bool) (int64, error) {
 	if s == nil || s.messages == nil {
 		return 0, errors.New("store not initialized")
 	}
 
 	key := accountID.Hex()
+	filter := bson.M{"accountId": accountID, "isDeleted": false}
+	if seen != nil {
+		key = key + ":seen:" + strconv.FormatBool(*seen)
+		filter["seen"] = *seen
+	}
 	nowUnix := time.Now().UnixNano()
 
 	if v, ok := s.messageCountCache.Load(key); ok {
@@ -1218,7 +1703,7 @@ func (s *Store) countMessagesCached(ctx context.Context, accountID bson.ObjectID
 		qCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		total, err := s.messages.CountDocuments(qCtx, bson.M{"accountId": accountID, "isDeleted": false})
+		total, err := s.messages.CountDocuments(qCtx, filter)
 		if err != nil {
 			return int64(0), err
 		}

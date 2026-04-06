@@ -21,6 +21,7 @@ import (
 	"mailapi/internal/health"
 	"mailapi/internal/queue"
 	smtpserver "mailapi/internal/smtp"
+	"mailapi/internal/store"
 
 	gosmtp "github.com/emersion/go-smtp"
 	"github.com/nats-io/nats.go"
@@ -85,6 +86,29 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	// Optional: MongoDB lookup for RCPT TO self-heal when Redis misses (e.g., Redis flush/data loss).
+	// 若未配置/未连通，则 SMTP 仍可运行，但地址缓存自愈能力会被禁用（完全依赖 Redis addr:* 缓存）。
+	var lookup smtpserver.RecipientLookup
+	if strings.TrimSpace(cfg.MongoDB.URI) != "" && strings.TrimSpace(cfg.MongoDB.Database) != "" {
+		st, err := store.New(ctx, store.MongoConfig{
+			URI:                    cfg.MongoDB.URI,
+			Database:               cfg.MongoDB.Database,
+			MaxPoolSize:            cfg.MongoDB.MaxPoolSize,
+			MinPoolSize:            cfg.MongoDB.MinPoolSize,
+			MaxConnecting:          cfg.MongoDB.MaxConnecting,
+			ConnectTimeout:         cfg.MongoDB.ConnectTimeout,
+			ServerSelectionTimeout: cfg.MongoDB.ServerSelectionTimeout,
+			MaxConnIdleTime:        cfg.MongoDB.MaxConnIdleTime,
+			AppName:                cfg.MongoDB.AppName,
+		}, cfg.Account.TTL, cfg.Message.TTL)
+		if err != nil {
+			log.Printf("WARNING: failed to connect to MongoDB for recipient lookup; address self-heal disabled: %v", err)
+		} else {
+			lookup = st
+			defer st.Close(context.Background())
+		}
+	}
+
 	// Initialize Redis cache (for RCPT TO validation and rate limiting)
 	ca, err := cache.New(ctx, cfg.Redis.Addr, cfg.Redis.Password, cfg.Redis.DB)
 	if err != nil {
@@ -116,10 +140,20 @@ func main() {
 			defer ncHealth.Close()
 		}
 
-		ready := health.NewReadyzChecks([]health.Check{
+		checks := []health.Check{
 			{Name: "redis", Check: ca.Ping},
 			{Name: "nats", Check: func(ctx context.Context) error { return checkNATSStream(ctx, ncHealth, cfg.NATS.Stream) }},
-		}, health.Options{})
+		}
+		// 若启用了 Mongo lookup，则也纳入 readiness（避免“收件自愈依赖未就绪”时误判 ready）。
+		if lookup != nil {
+			if st, ok := lookup.(interface {
+				Ping(ctx context.Context) error
+			}); ok {
+				checks = append(checks, health.Check{Name: "mongodb", Check: st.Ping})
+			}
+		}
+
+		ready := health.NewReadyzChecks(checks, health.Options{})
 
 		s, err := debugserver.NewWithReadyHandler(cfg.Server.SMTP.Debug, ready)
 		if err != nil {
@@ -135,7 +169,7 @@ func main() {
 		}()
 	}
 
-	servers, err := startSMTPServers(cfg, ca, q)
+	servers, err := startSMTPServers(cfg, ca, q, lookup)
 	if err != nil {
 		log.Fatalf("Failed to start SMTP server(s): %v", err)
 	}
@@ -157,7 +191,7 @@ func main() {
 	log.Println("SMTP server(s) stopped")
 }
 
-func startSMTPServers(cfg *config.Config, ca *cache.Cache, q *queue.Queue) ([]*gosmtp.Server, error) {
+func startSMTPServers(cfg *config.Config, ca *cache.Cache, q *queue.Queue, lookup smtpserver.RecipientLookup) ([]*gosmtp.Server, error) {
 	if cfg == nil {
 		return nil, errors.New("nil config")
 	}
@@ -179,7 +213,7 @@ func startSMTPServers(cfg *config.Config, ca *cache.Cache, q *queue.Queue) ([]*g
 		}
 
 		for _, l := range listeners {
-			backend := smtpserver.NewBackend(ca, q, cfg.Server.SMTP.Domain, l.Domains, cfg.Server.SMTP.MaxMessageBytes)
+			backend := smtpserver.NewBackend(ca, q, lookup, cfg.Account.TTL, cfg.Server.SMTP.Domain, l.Domains, cfg.Server.SMTP.MaxMessageBytes)
 			srv := smtpserver.NewServer(
 				backend, l.Addr, cfg.Server.SMTP.Domain,
 				cfg.Server.SMTP.MaxMessageBytes, cfg.Server.SMTP.MaxRecipients,
@@ -201,7 +235,7 @@ func startSMTPServers(cfg *config.Config, ca *cache.Cache, q *queue.Queue) ([]*g
 
 	// Single-listener mode (backward compatible: no domains in config)
 	addr := fmt.Sprintf("%s:%d", cfg.Server.SMTP.Host, cfg.Server.SMTP.Port)
-	backend := smtpserver.NewBackend(ca, q, cfg.Server.SMTP.Domain, nil, cfg.Server.SMTP.MaxMessageBytes)
+	backend := smtpserver.NewBackend(ca, q, lookup, cfg.Account.TTL, cfg.Server.SMTP.Domain, nil, cfg.Server.SMTP.MaxMessageBytes)
 	srv := smtpserver.NewServer(
 		backend, addr, cfg.Server.SMTP.Domain,
 		cfg.Server.SMTP.MaxMessageBytes, cfg.Server.SMTP.MaxRecipients,

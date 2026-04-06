@@ -44,6 +44,20 @@ func (h *Handler) ListDomains(c *gin.Context) {
 		domains = filtered
 	}
 
+	// 私有域名默认不对 wildcard / 未显式授权的调用方暴露。
+	// 规则：isPrivate=true 的域名必须“显式授权”（API key 明确列出，或 JWT 自然单域名授权）才会出现在列表中。
+	if len(domains) > 0 {
+		filtered := make([]model.Domain, 0, len(domains))
+		for _, d := range domains {
+			name := strings.ToLower(d.Domain)
+			if d.IsPrivate && !middleware.IsDomainExplicitlyAllowed(c, name) {
+				continue
+			}
+			filtered = append(filtered, d)
+		}
+		domains = filtered
+	}
+
 	c.JSON(http.StatusOK, model.HydraCollection{
 		Context:    "/contexts/Domain",
 		ID:         "/domains",

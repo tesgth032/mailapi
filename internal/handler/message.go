@@ -37,12 +37,27 @@ func (h *Handler) ListMessages(c *gin.Context) {
 		perPage = 30
 	}
 
+	// 常见筛选：seen=true/false
+	var seenFilter *bool
+	if s := strings.TrimSpace(c.Query("seen")); s != "" {
+		v, err := strconv.ParseBool(s)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "invalid seen filter"})
+			return
+		}
+		seenFilter = &v
+	}
+
 	var (
 		messages []model.Message
 		total    int64
 	)
 	if cursor != "" {
-		messages, total, err = h.store.ListMessagesAfter(c.Request.Context(), oid, cursor, perPage)
+		if seenFilter != nil {
+			messages, total, err = h.store.ListMessagesAfterFiltered(c.Request.Context(), oid, cursor, perPage, seenFilter)
+		} else {
+			messages, total, err = h.store.ListMessagesAfter(c.Request.Context(), oid, cursor, perPage)
+		}
 		if err != nil {
 			switch {
 			case errors.Is(err, store.ErrInvalidID):
@@ -60,7 +75,11 @@ func (h *Handler) ListMessages(c *gin.Context) {
 			page = 1
 		}
 
-		messages, total, err = h.store.ListMessages(c.Request.Context(), oid, page, perPage)
+		if seenFilter != nil {
+			messages, total, err = h.store.ListMessagesFiltered(c.Request.Context(), oid, page, perPage, seenFilter)
+		} else {
+			messages, total, err = h.store.ListMessages(c.Request.Context(), oid, page, perPage)
+		}
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "failed to list messages"})
 			return
@@ -199,6 +218,9 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "failed to delete message"})
 		return
 	}
+
+	// Best-effort: 释放配额（软删除视为不再占用）。失败不应影响删除结果。
+	_ = h.store.UpdateAccountUsed(c.Request.Context(), msg.AccountID, -msg.Size)
 
 	// Cleanup objects in background (rawMessage/attachments share the same prefix).
 	h.tryAsyncStorageCleanup(id)

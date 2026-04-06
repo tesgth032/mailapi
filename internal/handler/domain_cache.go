@@ -14,8 +14,10 @@ import (
 const domainsCacheTTL = 30 * time.Second
 
 type domainCacheEntry struct {
-	domains    []model.Domain
-	domainSet  map[string]struct{}
+	domains   []model.Domain
+	domainSet map[string]struct{}
+	// domainMap 用于快速取 domain 元信息（如 isPrivate），避免在热路径上遍历切片。
+	domainMap  map[string]model.Domain
 	expiresAt  time.Time
 	lastUpdate time.Time
 }
@@ -43,14 +45,18 @@ func (h *Handler) getDomainCache(ctx context.Context) (*domainCacheEntry, error)
 	}
 
 	set := make(map[string]struct{}, len(domains))
+	mm := make(map[string]model.Domain, len(domains))
 	for _, d := range domains {
 		// 域名比较应当大小写不敏感
-		set[strings.ToLower(d.Domain)] = struct{}{}
+		key := strings.ToLower(d.Domain)
+		set[key] = struct{}{}
+		mm[key] = d
 	}
 
 	e := &domainCacheEntry{
 		domains:    domains,
 		domainSet:  set,
+		domainMap:  mm,
 		expiresAt:  now.Add(domainsCacheTTL),
 		lastUpdate: now,
 	}
@@ -65,6 +71,22 @@ func (h *Handler) domainAvailable(ctx context.Context, domain string) (bool, err
 	}
 	_, ok := e.domainSet[strings.ToLower(domain)]
 	return ok, nil
+}
+
+func (h *Handler) getDomainInfo(ctx context.Context, domain string) (*model.Domain, error) {
+	e, err := h.getDomainCache(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if e.domainMap == nil {
+		return nil, store.ErrNotFound
+	}
+	d, ok := e.domainMap[strings.ToLower(domain)]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	dd := d // 返回副本，避免外部修改缓存内容
+	return &dd, nil
 }
 
 func (h *Handler) domainAvailableOrError(ctx context.Context, domain string) error {

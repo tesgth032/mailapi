@@ -293,6 +293,42 @@ func IsDomainAllowed(c *gin.Context, domain string) bool {
 	return false
 }
 
+// IsDomainExplicitlyAllowed 判断 domain 是否被“显式授权”。
+//
+// 典型用途：私有域名（isPrivate=true）不应被 wildcard（"*"）隐式放开，必须显式在 API key domains 中列出，
+// 或者由 JWT（单一 domain）自然显式授权。
+//
+// 规则：
+// - API key：只要 DomainSet（或 Domains 列表中除 "*" 外的项）包含该 domain，则视为显式授权。
+// - 非 API key（例如未配置 API key 或仅 JWT）：CtxAPIKeyDomains 中出现该 domain 则视为显式授权。
+func IsDomainExplicitlyAllowed(c *gin.Context, domain string) bool {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" {
+		return false
+	}
+
+	if info := GetAPIKeyInfo(c); info != nil {
+		if info.DomainSet != nil {
+			_, ok := info.DomainSet[domain]
+			return ok
+		}
+		for _, d := range info.Domains {
+			if d == domain {
+				return true
+			}
+		}
+		return false
+	}
+
+	// 无 APIKeyInfo 时，直接从 ctx 的 allowed-domains 列表里匹配（JWT 通常是单域名）。
+	for _, d := range GetAllowedDomains(c) {
+		if strings.ToLower(strings.TrimSpace(d)) == domain {
+			return true
+		}
+	}
+	return false
+}
+
 // GetAllowedDomains returns the domain list allowed by the current API key.
 func GetAllowedDomains(c *gin.Context) []string {
 	val, exists := c.Get(CtxAPIKeyDomains)

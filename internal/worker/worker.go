@@ -3,8 +3,8 @@ package worker
 import (
 	"bytes"
 	"context"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -81,12 +81,12 @@ func New(s store.Interface, c cache.Interface, q queue.Interface, st storage.Int
 	}
 
 	w := &Worker{
-		store:      s,
-		cache:      c,
-		queue:      q,
-		storage:    st,
-		messageTTL: messageTTL,
-		objGCKey:   "mailapi:objgc:lock",
+		store:             s,
+		cache:             c,
+		queue:             q,
+		storage:           st,
+		messageTTL:        messageTTL,
+		objGCKey:          "mailapi:objgc:lock",
 		storageCleanupSem: make(chan struct{}, maxCleanup),
 	}
 	startAfter := ""
@@ -332,6 +332,42 @@ func (w *Worker) processForRecipient(ctx context.Context, incoming *model.Incomi
 		}
 	}
 
+	// 配额预占用：在做 MIME 解析与对象存储上传前先做原子 used+delta，避免在超额时白做大量 CPU/IO。
+	// delta 以“原始邮件字节数（RFC822）”计。若后续处理失败/幂等冲突，会回滚该预占用。
+	delta := int64(len(incoming.RawMessage))
+	reserved := false
+	committed := false
+	if delta > 0 {
+		ok, err := w.store.TryReserveAccountUsed(ctx, accountID, delta)
+		if err != nil {
+			return fmt.Errorf("reserve quota for %s: %w", recipient, err)
+		}
+		if !ok {
+			// used 可能因 TTL 自动删除/异常回滚/崩溃导致漂移，这里做一次纠偏后再重试。
+			fixCtx, fixCancel := context.WithTimeout(ctx, 10*time.Second)
+			_, _ = w.store.RecalculateAccountUsed(fixCtx, accountID)
+			fixCancel()
+
+			ok2, err2 := w.store.TryReserveAccountUsed(ctx, accountID, delta)
+			if err2 != nil {
+				return fmt.Errorf("reserve quota for %s: %w", recipient, err2)
+			}
+			if !ok2 {
+				return queue.Permanent(fmt.Errorf("quota exceeded for %s", recipient))
+			}
+		}
+		reserved = true
+	}
+	defer func() {
+		if !reserved || committed || delta <= 0 {
+			return
+		}
+		// 回滚必须尽量成功：用后台 ctx + 超时，避免上游 ctx 已取消导致 used 永久漂移。
+		relCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = w.store.UpdateAccountUsed(relCtx, accountID, -delta)
+		cancel()
+	}()
+
 	// Parse the MIME message
 	reader := bytes.NewReader(incoming.RawMessage)
 	mr, err := mail.CreateReader(reader)
@@ -472,8 +508,7 @@ func (w *Worker) processForRecipient(ctx context.Context, incoming *model.Incomi
 		return fmt.Errorf("store message: %w", err)
 	}
 
-	// Update account used quota
-	_ = w.store.UpdateAccountUsed(ctx, accountID, msg.Size)
+	committed = true
 
 	// Publish SSE notification via Redis pub/sub
 	// 用 struct 代替 map：避免 map key 排序与反射开销（高并发下更省 CPU/分配）。

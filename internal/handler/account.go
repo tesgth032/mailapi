@@ -51,12 +51,18 @@ func (h *Handler) CreateAccount(c *gin.Context) {
 		return
 	}
 
-	if err := h.domainAvailableOrError(c.Request.Context(), domain); err != nil {
+	di, err := h.getDomainInfo(c.Request.Context(), domain)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "domain not available"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "internal error"})
+		return
+	}
+	// 私有域名必须显式授权（不能仅靠 wildcard "*" 放开）。
+	if di.IsPrivate && !middleware.IsDomainExplicitlyAllowed(c, domain) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "private domain requires explicit API key authorization"})
 		return
 	}
 
@@ -126,12 +132,17 @@ func (h *Handler) RandomAddress(c *gin.Context) {
 	}
 
 	// Verify domain exists
-	if err := h.domainAvailableOrError(c.Request.Context(), domain); err != nil {
+	di, err := h.getDomainInfo(c.Request.Context(), domain)
+	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			c.JSON(http.StatusBadRequest, gin.H{"code": 400, "message": "domain not available"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"code": 500, "message": "internal error"})
+		return
+	}
+	if di.IsPrivate && !middleware.IsDomainExplicitlyAllowed(c, domain) {
+		c.JSON(http.StatusForbidden, gin.H{"code": 403, "message": "private domain requires explicit API key authorization"})
 		return
 	}
 

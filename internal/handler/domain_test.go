@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"mailapi/internal/middleware"
 	"mailapi/internal/model"
 )
 
@@ -106,5 +107,79 @@ func TestListDomains_HydraFormat(t *testing.T) {
 		if _, ok := raw[key]; !ok {
 			t.Errorf("missing Hydra field %q", key)
 		}
+	}
+}
+
+func TestListDomains_PrivateDomainHiddenByDefault(t *testing.T) {
+	ms := &mockStore{
+		listDomainsFunc: func(ctx context.Context) ([]model.Domain, error) {
+			return []model.Domain{
+				{Domain: "public.com", IsActive: true, IsPrivate: false},
+				{Domain: "private.com", IsActive: true, IsPrivate: true},
+			}, nil
+		},
+	}
+	h := newTestHandler(ms, &mockCache{}, &mockStorage{})
+
+	c, w := newTestContext("GET", "/domains", nil)
+	h.ListDomains(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var member []model.Domain
+	if err := json.Unmarshal(raw["hydra:member"], &member); err != nil {
+		t.Fatalf("unmarshal member: %v", err)
+	}
+	if len(member) != 1 {
+		t.Fatalf("member len = %d, want 1", len(member))
+	}
+	if member[0].Domain != "public.com" {
+		t.Fatalf("domain=%q want %q", member[0].Domain, "public.com")
+	}
+}
+
+func TestListDomains_PrivateDomainShownWithExplicitAuthorization(t *testing.T) {
+	ms := &mockStore{
+		listDomainsFunc: func(ctx context.Context) ([]model.Domain, error) {
+			return []model.Domain{
+				{Domain: "public.com", IsActive: true, IsPrivate: false},
+				{Domain: "private.com", IsActive: true, IsPrivate: true},
+			}, nil
+		},
+	}
+	h := newTestHandler(ms, &mockCache{}, &mockStorage{})
+
+	c, w := newTestContext("GET", "/domains", nil)
+	// 模拟 wildcard API key，但显式授权 private.com（用于私有域名访问）。
+	c.Set(middleware.CtxAPIKeyInfo, &middleware.APIKeyInfo{
+		Name:      "Test",
+		Domains:   []string{"*"},
+		DomainSet: map[string]struct{}{"private.com": {}},
+		Wildcard:  true,
+	})
+	c.Set(middleware.CtxAPIKeyDomains, []string{"*"})
+
+	h.ListDomains(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	var member []model.Domain
+	if err := json.Unmarshal(raw["hydra:member"], &member); err != nil {
+		t.Fatalf("unmarshal member: %v", err)
+	}
+	if len(member) != 2 {
+		t.Fatalf("member len = %d, want 2", len(member))
 	}
 }

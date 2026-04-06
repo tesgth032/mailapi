@@ -1,0 +1,44 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go build output
+/bin/
+/dist/
+
+# Test binary
+*.test
+
+# Go coverage
+*.out
+*.prof
+
+# Dependency directory
+/vendor/
+
+# IDE / Editor
+.idea/
+.vscode/
+.claude/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# OS junk
+.Trash-*
+desktop.ini
+ehthumbs.db
+
+# Debug
+__debug_bin*

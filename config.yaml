@@ -33,6 +33,9 @@ domains:
 # Rate limiting:
 #   rpmLimit       — total requests per minute for this key (0 = unlimited)
 #   domainLimits   — per-domain RPM overrides for this key
+# yyds extras:
+#   defaultDomain    — /v1/accounts* 未传 domain 时优先使用的父域名
+#   defaultSubdomain — /v1/accounts/wildcard 未传 subdomain 时优先使用的真实子域
 # -----------------------------------------------------------------------------
 apiKeys:
   - key: "sk_change_me_to_a_random_key"
@@ -41,6 +44,8 @@ apiKeys:
     # If you have private domains (isPrivate=true), you must still explicitly list them here, e.g.:
     # domains: ["*", "vip.example.com"]
     domains: ["*"]
+    #defaultDomain: "example.com"
+    #defaultSubdomain: "mail"
     rpmLimit: 0           # unlimited (uses global limit only)
 #  - key: "sk_partner_key_here"
 #    name: "Partner"

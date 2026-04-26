@@ -62,7 +62,7 @@
 
 - `duck`：以 [USAGE_GUIDE.md](USAGE_GUIDE.md) 与 [PROJECT_DOCUMENTATION.md](PROJECT_DOCUMENTATION.md) 为主文档。
 - `cfworker`：以 [cfworker.md](cfworker.md) 为集成方案文档，并以 `cloudflare_temp_email` 上游文档为准。
-- `yyds`：以 [yyds.md](yyds.md) 为主文档。当前实现覆盖 YYDS Mail 文档中的“公共临时邮箱 + 公共元数据”子集，不包含其控制台/计费/Webhook/DNS 自动化等站内产品功能。
+- `yyds`：以 [yyds.md](yyds.md) 为主文档。当前实现覆盖 YYDS Mail 文档页中开发者可直接接入的临时邮箱、消息、实时收件与配额快照接口，不包含其控制台/计费/Webhook/DNS 自动化等站内产品功能。
 
 ---
 

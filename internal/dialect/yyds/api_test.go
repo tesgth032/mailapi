@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"regexp"
 	"strings"
 	"testing"
@@ -22,6 +23,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	"golang.org/x/net/websocket"
 )
 
 func init() {
@@ -41,6 +43,7 @@ type testStore struct {
 	getMessageMetaFunc       func(ctx context.Context, id string) (*model.Message, error)
 	getMessageRawFunc        func(ctx context.Context, id string) (*model.Message, error)
 	updateMessageFlagsFunc   func(ctx context.Context, id string, seen, keep *bool) error
+	bulkUpdateByAccountFunc  func(ctx context.Context, accountID bson.ObjectID, seen, keep *bool) (int64, error)
 }
 
 func (m *testStore) Ping(ctx context.Context) error { return nil }
@@ -146,6 +149,9 @@ func (m *testStore) BulkUpdateMessageFlagsByIDs(ctx context.Context, accountID b
 	return 0, nil
 }
 func (m *testStore) BulkUpdateMessageFlagsByAccount(ctx context.Context, accountID bson.ObjectID, seen, keep *bool) (int64, error) {
+	if m.bulkUpdateByAccountFunc != nil {
+		return m.bulkUpdateByAccountFunc(ctx, accountID, seen, keep)
+	}
 	return 0, nil
 }
 func (m *testStore) UpdateMessageSeen(ctx context.Context, id string, seen bool) error { return nil }
@@ -227,6 +233,31 @@ func (s *testStorage) UploadRawMessage(ctx context.Context, messageID string, da
 }
 func (s *testStorage) OpenRawMessage(ctx context.Context, messageID string) (io.ReadCloser, string, int64, error) {
 	return nil, "", 0, nil
+}
+
+type testEventStream struct {
+	ch chan string
+}
+
+func (s *testEventStream) Next(ctx context.Context) (string, error) {
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case payload, ok := <-s.ch:
+		if !ok {
+			return "", io.EOF
+		}
+		return payload, nil
+	}
+}
+
+func (s *testEventStream) Close() error {
+	if s == nil || s.ch == nil {
+		return nil
+	}
+	close(s.ch)
+	s.ch = nil
+	return nil
 }
 
 func newTestServer(t *testing.T, st store.Interface, ca cache.Interface) http.Handler {
@@ -457,6 +488,247 @@ func TestCreateWildcardAccount_PrivateParentRequiresExplicitAPIKeyAuthorization(
 	}
 }
 
+func TestCreateAccount_UsesAPIKeyDefaultDomain(t *testing.T) {
+	now := time.Date(2026, 4, 27, 11, 30, 0, 0, time.UTC)
+	accountID := bson.NewObjectID()
+	var createdAddress string
+	st := &testStore{
+		listDomainsFunc: func(ctx context.Context) ([]model.Domain, error) {
+			return []model.Domain{
+				{Domain: "example.com", IsActive: true},
+				{Domain: "public.test", IsActive: true},
+			}, nil
+		},
+		getDomainByNameFunc: func(ctx context.Context, domain string) (*model.Domain, error) {
+			switch domain {
+			case "example.com", "public.test":
+				return &model.Domain{Domain: domain, IsActive: true}, nil
+			default:
+				return nil, store.ErrNotFound
+			}
+		},
+		createAccountFunc: func(ctx context.Context, account *model.Account) error {
+			createdAddress = account.Address
+			account.ID = accountID
+			account.CreatedAt = now
+			return nil
+		},
+	}
+	h := New(Config{
+		Store:      st,
+		Cache:      &testCache{},
+		Storage:    &testStorage{},
+		Auth:       auth.New("test-secret", time.Hour),
+		AccountTTL: 24 * time.Hour,
+		APIKeys: map[string]*middleware.APIKeyInfo{
+			"test-key": {
+				Name:          "Test",
+				Domains:       []string{"example.com", "public.test"},
+				DomainSet:     map[string]struct{}{"example.com": {}, "public.test": {}},
+				DefaultDomain: "public.test",
+			},
+		},
+		Prefix: prefix.New(),
+	})
+
+	w := performJSON(h, http.MethodPost, "/v1/accounts", `{"localPart":"demo"}`, map[string]string{
+		"X-API-Key": "test-key",
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if createdAddress != "demo@public.test" {
+		t.Fatalf("createdAddress=%q", createdAddress)
+	}
+}
+
+func TestCreateWildcardAccount_UsesLegacyWildcardFields(t *testing.T) {
+	now := time.Date(2026, 4, 27, 11, 45, 0, 0, time.UTC)
+	accountID := bson.NewObjectID()
+	var createdAddress string
+	st := &testStore{
+		listDomainsFunc: func(ctx context.Context) ([]model.Domain, error) {
+			return []model.Domain{{Domain: "example.com", IsActive: true}}, nil
+		},
+		getDomainByNameFunc: func(ctx context.Context, domain string) (*model.Domain, error) {
+			if domain == "example.com" {
+				return &model.Domain{Domain: "example.com", IsActive: true}, nil
+			}
+			return nil, store.ErrNotFound
+		},
+		createAccountFunc: func(ctx context.Context, account *model.Account) error {
+			createdAddress = account.Address
+			account.ID = accountID
+			account.CreatedAt = now
+			return nil
+		},
+	}
+	h := newTestServer(t, st, &testCache{})
+
+	w := performJSON(h, http.MethodPost, "/v1/accounts/wildcard", `{"localPart":"demo","wildcardRuleId":"example.com","subdomainLabel":"mail"}`, nil)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if createdAddress != "demo@mail.example.com" {
+		t.Fatalf("createdAddress=%q", createdAddress)
+	}
+}
+
+func TestCreateWildcardAccount_UsesAPIKeyDefaultSubdomain(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 0, 0, 0, time.UTC)
+	accountID := bson.NewObjectID()
+	var createdAddress string
+	st := &testStore{
+		listDomainsFunc: func(ctx context.Context) ([]model.Domain, error) {
+			return []model.Domain{{Domain: "example.com", IsActive: true}}, nil
+		},
+		getDomainByNameFunc: func(ctx context.Context, domain string) (*model.Domain, error) {
+			if domain == "example.com" {
+				return &model.Domain{Domain: "example.com", IsActive: true}, nil
+			}
+			return nil, store.ErrNotFound
+		},
+		createAccountFunc: func(ctx context.Context, account *model.Account) error {
+			createdAddress = account.Address
+			account.ID = accountID
+			account.CreatedAt = now
+			return nil
+		},
+	}
+	h := New(Config{
+		Store:      st,
+		Cache:      &testCache{},
+		Storage:    &testStorage{},
+		Auth:       auth.New("test-secret", time.Hour),
+		AccountTTL: 24 * time.Hour,
+		APIKeys: map[string]*middleware.APIKeyInfo{
+			"test-key": {
+				Name:             "Test",
+				Domains:          []string{"example.com"},
+				DomainSet:        map[string]struct{}{"example.com": {}},
+				DefaultDomain:    "example.com",
+				DefaultSubdomain: "team",
+			},
+		},
+		Prefix: prefix.New(),
+	})
+
+	w := performJSON(h, http.MethodPost, "/v1/accounts/wildcard", `{"localPart":"demo"}`, map[string]string{
+		"X-API-Key": "test-key",
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if createdAddress != "demo@team.example.com" {
+		t.Fatalf("createdAddress=%q", createdAddress)
+	}
+}
+
+func TestCreateWildcardAccount_RandomParentDomainWhenOmitted(t *testing.T) {
+	now := time.Date(2026, 4, 27, 12, 15, 0, 0, time.UTC)
+	accountID := bson.NewObjectID()
+	var createdAddress string
+	st := &testStore{
+		listDomainsFunc: func(ctx context.Context) ([]model.Domain, error) {
+			return []model.Domain{
+				{Domain: "example.com", IsActive: true},
+				{Domain: "example.org", IsActive: true},
+			}, nil
+		},
+		getDomainByNameFunc: func(ctx context.Context, domain string) (*model.Domain, error) {
+			switch domain {
+			case "example.com", "example.org":
+				return &model.Domain{Domain: domain, IsActive: true}, nil
+			default:
+				return nil, store.ErrNotFound
+			}
+		},
+		createAccountFunc: func(ctx context.Context, account *model.Account) error {
+			createdAddress = account.Address
+			account.ID = accountID
+			account.CreatedAt = now
+			return nil
+		},
+	}
+	h := newTestServer(t, st, &testCache{})
+
+	w := performJSON(h, http.MethodPost, "/v1/accounts/wildcard", `{"localPart":"demo"}`, nil)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	re := regexp.MustCompile(`^demo@w[0-9a-f]{12}\.(example\.com|example\.org)$`)
+	if !re.MatchString(createdAddress) {
+		t.Fatalf("createdAddress=%q", createdAddress)
+	}
+}
+
+func TestMarkMessagesRead_UsesQueryAddress(t *testing.T) {
+	accountID := bson.NewObjectID()
+	st := &testStore{
+		getDomainByNameFunc: func(ctx context.Context, domain string) (*model.Domain, error) {
+			if domain == "example.com" {
+				return &model.Domain{Domain: "example.com", IsActive: true}, nil
+			}
+			return nil, store.ErrNotFound
+		},
+		getAccountByAddressFunc: func(ctx context.Context, address string) (*model.Account, error) {
+			if address != "demo@example.com" {
+				t.Fatalf("address=%q", address)
+			}
+			return &model.Account{ID: accountID, Address: address}, nil
+		},
+		bulkUpdateByAccountFunc: func(ctx context.Context, oid bson.ObjectID, seen, keep *bool) (int64, error) {
+			if oid != accountID {
+				t.Fatalf("accountID=%s", oid.Hex())
+			}
+			if seen == nil || !*seen {
+				t.Fatalf("seen=%v", seen)
+			}
+			return 3, nil
+		},
+		countMessagesFunc: func(ctx context.Context, oid bson.ObjectID) (int64, error) {
+			return 5, nil
+		},
+	}
+	h := New(Config{
+		Store:      st,
+		Cache:      &testCache{},
+		Storage:    &testStorage{},
+		Auth:       auth.New("test-secret", time.Hour),
+		AccountTTL: 24 * time.Hour,
+		APIKeys: map[string]*middleware.APIKeyInfo{
+			"test-key": {
+				Name:      "Test",
+				Domains:   []string{"example.com"},
+				DomainSet: map[string]struct{}{"example.com": {}},
+			},
+		},
+		Prefix: prefix.New(),
+	})
+
+	w := performJSON(h, http.MethodPost, "/v1/messages/mark-read?address=demo@example.com", "", map[string]string{
+		"X-API-Key": "test-key",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Updated     int64 `json:"updated"`
+			AlreadySeen int64 `json:"alreadySeen"`
+			Total       int64 `json:"total"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !resp.Success || resp.Data.Updated != 3 || resp.Data.AlreadySeen != 2 || resp.Data.Total != 5 {
+		t.Fatalf("unexpected body=%s", w.Body.String())
+	}
+}
+
 func TestListMessages_WithTempToken(t *testing.T) {
 	accountID := bson.NewObjectID()
 	messageID := bson.NewObjectID()
@@ -563,5 +835,295 @@ func TestGetMessageSource_WrapsRawSource(t *testing.T) {
 	}
 	if !resp.Success || resp.Data.ID != messageID.Hex() || !strings.Contains(resp.Data.Raw, "hello") {
 		t.Fatalf("unexpected body=%s", w.Body.String())
+	}
+}
+
+func TestGetMessageSource_AliasRoute(t *testing.T) {
+	accountID := bson.NewObjectID()
+	messageID := bson.NewObjectID()
+	au := auth.New("test-secret", time.Hour)
+	token, err := au.GenerateToken(accountID.Hex(), "demo@example.com")
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+
+	st := &testStore{
+		getMessageRawFunc: func(ctx context.Context, id string) (*model.Message, error) {
+			return &model.Message{
+				ID:         messageID,
+				AccountID:  accountID,
+				RawMessage: []byte("Subject: alias\r\n\r\nhello"),
+			}, nil
+		},
+	}
+	h := New(Config{
+		Store:      st,
+		Cache:      &testCache{},
+		Storage:    &testStorage{},
+		Auth:       au,
+		AccountTTL: 24 * time.Hour,
+		Prefix:     prefix.New(),
+	})
+
+	w := performJSON(h, http.MethodGet, "/v1/messages/"+messageID.Hex()+"/source", "", map[string]string{
+		"Authorization": "Bearer " + token,
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "alias") {
+		t.Fatalf("unexpected body=%s", w.Body.String())
+	}
+}
+
+func TestListWildcardRules_ReturnsVisibleDomains(t *testing.T) {
+	st := &testStore{
+		listDomainsFunc: func(ctx context.Context) ([]model.Domain, error) {
+			return []model.Domain{
+				{Domain: "example.com", IsActive: true},
+				{Domain: "private.test", IsActive: true, IsPrivate: true},
+			}, nil
+		},
+	}
+	h := New(Config{
+		Store:      st,
+		Cache:      &testCache{},
+		Storage:    &testStorage{},
+		Auth:       auth.New("test-secret", time.Hour),
+		AccountTTL: 24 * time.Hour,
+		APIKeys: map[string]*middleware.APIKeyInfo{
+			"test-key": {
+				Name:      "Test",
+				Domains:   []string{"example.com", "private.test"},
+				DomainSet: map[string]struct{}{"example.com": {}, "private.test": {}},
+			},
+		},
+		Prefix: prefix.New(),
+	})
+
+	w := performJSON(h, http.MethodGet, "/v1/me/wildcard-rules", "", map[string]string{
+		"X-API-Key": "test-key",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Success bool    `json:"success"`
+		Data    []gin.H `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !resp.Success || len(resp.Data) != 2 {
+		t.Fatalf("unexpected body=%s", w.Body.String())
+	}
+	if resp.Data[0]["id"] == "" || resp.Data[0]["domain"] == "" {
+		t.Fatalf("unexpected data=%+v", resp.Data)
+	}
+}
+
+func TestGetQuota_ReturnsEffectivePlanSnapshot(t *testing.T) {
+	h := New(Config{
+		Store:      &testStore{},
+		Cache:      &testCache{},
+		Storage:    &testStorage{},
+		Auth:       auth.New("test-secret", time.Hour),
+		AccountTTL: 24 * time.Hour,
+		APIKeys: map[string]*middleware.APIKeyInfo{
+			"test-key": {
+				Name:     "Test",
+				Domains:  []string{"*"},
+				Wildcard: true,
+			},
+		},
+		Prefix: prefix.New(),
+		Public: config.YYDSDialectConfig{
+			Plans: []config.YYDSPlanConfig{
+				{
+					ID:               "pro",
+					Name:             "Pro",
+					MaxDomains:       5,
+					MaxInboxes:       10,
+					MaxWildcardRules: 3,
+					MaxRPS:           20,
+					IsActive:         true,
+				},
+			},
+		},
+	})
+
+	w := performJSON(h, http.MethodGet, "/v1/me/quota", "", map[string]string{
+		"X-API-Key": "test-key",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Plan struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"plan"`
+			BonusDaily    int64 `json:"bonusDaily"`
+			PurchasedPool int64 `json:"purchasedPool"`
+			WildcardRules int64 `json:"wildcardRules"`
+			Dimensions    struct {
+				MaxDomains int64 `json:"maxDomains"`
+				MaxRps     int64 `json:"maxRps"`
+			} `json:"dimensions"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !resp.Success || resp.Data.Plan.ID != "pro" || resp.Data.Dimensions.MaxDomains != 5 || resp.Data.WildcardRules != 3 || resp.Data.Dimensions.MaxRps != 20 {
+		t.Fatalf("unexpected body=%s", w.Body.String())
+	}
+}
+
+func TestCreateWSTicket_ByAddress(t *testing.T) {
+	accountID := bson.NewObjectID()
+	au := auth.New("test-secret", time.Hour)
+	st := &testStore{
+		getDomainByNameFunc: func(ctx context.Context, domain string) (*model.Domain, error) {
+			if domain == "example.com" {
+				return &model.Domain{Domain: "example.com", IsActive: true}, nil
+			}
+			return nil, store.ErrNotFound
+		},
+		getAccountByAddressFunc: func(ctx context.Context, address string) (*model.Account, error) {
+			return &model.Account{ID: accountID, Address: address}, nil
+		},
+	}
+	h := New(Config{
+		Store:      st,
+		Cache:      &testCache{},
+		Storage:    &testStorage{},
+		Auth:       au,
+		AccountTTL: 24 * time.Hour,
+		APIKeys: map[string]*middleware.APIKeyInfo{
+			"test-key": {
+				Name:      "Test",
+				Domains:   []string{"example.com"},
+				DomainSet: map[string]struct{}{"example.com": {}},
+			},
+		},
+		Prefix: prefix.New(),
+	})
+
+	w := performJSON(h, http.MethodGet, "/v1/auth/ws-ticket?address=demo@example.com", "", map[string]string{
+		"X-API-Key": "test-key",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Token   string `json:"token"`
+			Ticket  string `json:"ticket"`
+			Address string `json:"address"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !resp.Success || resp.Data.Token == "" || resp.Data.Token != resp.Data.Ticket || resp.Data.Address != "demo@example.com" {
+		t.Fatalf("unexpected body=%s", w.Body.String())
+	}
+	claims, err := au.ValidateToken(resp.Data.Token)
+	if err != nil {
+		t.Fatalf("validate token: %v", err)
+	}
+	if claims.AccountID != accountID.Hex() || claims.Address != "demo@example.com" {
+		t.Fatalf("claims=%+v", claims)
+	}
+}
+
+func TestHandleWS_PushesRealtimeMessage(t *testing.T) {
+	accountID := bson.NewObjectID()
+	messageID := bson.NewObjectID()
+	eventStream := &testEventStream{ch: make(chan string, 1)}
+	oldOpen := openAccountEventStream
+	openAccountEventStream = func(ca cache.Interface, account string) (accountEventStream, error) {
+		if account != accountID.Hex() {
+			t.Fatalf("account=%q", account)
+		}
+		return eventStream, nil
+	}
+	t.Cleanup(func() {
+		openAccountEventStream = oldOpen
+		_ = eventStream.Close()
+	})
+
+	au := auth.New("test-secret", time.Hour)
+	st := &testStore{
+		getDomainByNameFunc: func(ctx context.Context, domain string) (*model.Domain, error) {
+			if domain == "example.com" {
+				return &model.Domain{Domain: "example.com", IsActive: true}, nil
+			}
+			return nil, store.ErrNotFound
+		},
+		getAccountByAddressFunc: func(ctx context.Context, address string) (*model.Account, error) {
+			return &model.Account{ID: accountID, Address: address}, nil
+		},
+		getMessageMetaFunc: func(ctx context.Context, id string) (*model.Message, error) {
+			return &model.Message{ID: messageID, AccountID: accountID, CreatedAt: time.Date(2026, 4, 27, 13, 0, 0, 0, time.UTC)}, nil
+		},
+	}
+	h := New(Config{
+		Store:      st,
+		Cache:      &testCache{},
+		Storage:    &testStorage{},
+		Auth:       au,
+		AccountTTL: 24 * time.Hour,
+		APIKeys: map[string]*middleware.APIKeyInfo{
+			"test-key": {
+				Name:      "Test",
+				Domains:   []string{"example.com"},
+				DomainSet: map[string]struct{}{"example.com": {}},
+			},
+		},
+		Prefix: prefix.New(),
+	})
+
+	server := httptest.NewServer(h)
+	defer server.Close()
+
+	w := performJSON(h, http.MethodGet, "/v1/auth/ws-ticket?address=demo@example.com", "", map[string]string{
+		"X-API-Key": "test-key",
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("ticket status=%d body=%s", w.Code, w.Body.String())
+	}
+	var ticketResp struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Token string `json:"token"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &ticketResp); err != nil {
+		t.Fatalf("unmarshal ticket: %v", err)
+	}
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/ws?token=" + url.QueryEscape(ticketResp.Data.Token)
+	ws, err := websocket.Dial(wsURL, "", "http://localhost/")
+	if err != nil {
+		t.Fatalf("websocket dial: %v", err)
+	}
+	defer ws.Close()
+
+	eventStream.ch <- `{"@type":"Message","id":"` + messageID.Hex() + `","subject":"hello","from":{"address":"sender@example.org"}}`
+
+	var payload string
+	if err := websocket.Message.Receive(ws, &payload); err != nil {
+		t.Fatalf("receive websocket message: %v", err)
+	}
+	if !strings.Contains(payload, `"type":"message.new"`) || !strings.Contains(payload, `"mailbox":"demo@example.com"`) || !strings.Contains(payload, `"subject":"hello"`) {
+		t.Fatalf("payload=%s", payload)
 	}
 }

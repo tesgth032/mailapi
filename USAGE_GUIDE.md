@@ -116,12 +116,13 @@ dialects:
 `yyds` 风格不依赖额外上游；它直接复用本地 `mailapi` 的邮箱/消息存储能力，并把接口转换为 YYDS Mail 的 `/v1` 风格。支持的范围包括：
 
 - 公共临时邮箱接口：`/v1/accounts*`、`/v1/token`
-- 邮件接口：`/v1/messages*`、`/v1/sources/{id}`
-- 公共元数据接口：`/v1/domains`、`/v1/plans`、`/v1/pricing`、`/v1/domain-reward/config`、`/v1/stats`、`/v1/llms.txt`
+- 邮件接口：`/v1/messages*`、`/v1/messages/{id}/source`、`/v1/sources/{id}`
+- 实时收件接口：`/v1/auth/ws-ticket`、`/v1/ws`
+- 兼容元数据接口：`/v1/domains`、`/v1/me/domains`、`/v1/me/wildcard-rules`、`/v1/me/quota`、`/v1/plans`、`/v1/pricing`、`/v1/domain-reward/config`、`/v1/stats`、`/v1/llms.txt`
 
 补充说明：
 
-- `yyds` 当前实现的是 YYDS Mail 文档中的“公共临时邮箱/公共元数据”子集；其站内控制台、计费、Webhook、DNS 自动化等功能不在本仓库内实现。
+- `yyds` 当前实现的是 YYDS Mail 文档页中开发者可直接接入的临时邮箱、消息、实时收件与配额快照子集；其站内控制台、计费、Webhook、DNS 自动化等完整产品能力不在本仓库内实现。
 - `/v1/accounts/wildcard` 已支持基于已配置父域动态创建 child-domain 邮箱；若省略 `subdomain`，服务端会自动生成随机 child-domain。
 - 前提是父域已经配置到 `mailapi`，并且外部 DNS / MX 的泛解析（例如 `*.example.com`）已经指向当前 SMTP 服务；`mailapi` 只负责服务端接收与存储，不负责代管 DNS。
 

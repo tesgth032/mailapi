@@ -35,11 +35,13 @@ type DomainConfig struct {
 // APIKeyConfig defines an API key with domain-level access control and
 // per-key rate limiting. Keys default to the sk_ prefix; dk_ is also accepted.
 type APIKeyConfig struct {
-	Key          string           `yaml:"key"`
-	Name         string           `yaml:"name"`
-	Domains      []string         `yaml:"domains"`                // ["*"] for all domains
-	RPMLimit     int64            `yaml:"rpmLimit,omitempty"`     // per-key RPM limit (0 = unlimited)
-	DomainLimits map[string]int64 `yaml:"domainLimits,omitempty"` // per-key-per-domain RPM overrides
+	Key              string           `yaml:"key"`
+	Name             string           `yaml:"name"`
+	Domains          []string         `yaml:"domains"`                    // ["*"] for all domains
+	DefaultDomain    string           `yaml:"defaultDomain,omitempty"`    // 可选：创建邮箱时优先使用的父域名
+	DefaultSubdomain string           `yaml:"defaultSubdomain,omitempty"` // 可选：/v1/accounts/wildcard 未传 subdomain 时优先使用
+	RPMLimit         int64            `yaml:"rpmLimit,omitempty"`         // per-key RPM limit (0 = unlimited)
+	DomainLimits     map[string]int64 `yaml:"domainLimits,omitempty"`     // per-key-per-domain RPM overrides
 }
 
 // RateLimitConfig defines global rate limiting.

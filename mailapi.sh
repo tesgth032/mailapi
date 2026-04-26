@@ -1108,6 +1108,8 @@ apiKeys:
   - key: "$admin_key"
     name: "Admin"
     domains: ["*"]
+    #defaultDomain: "example.com"
+    #defaultSubdomain: "mail"
     rpmLimit: 0
 
 rateLimit:

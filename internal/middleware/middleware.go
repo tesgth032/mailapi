@@ -22,8 +22,10 @@ const (
 
 // APIKeyInfo holds metadata for a validated API key.
 type APIKeyInfo struct {
-	Name    string
-	Domains []string
+	Name             string
+	Domains          []string
+	DefaultDomain    string
+	DefaultSubdomain string
 	// DomainSet 是 Domains 的加速结构（key=domain，小写）。当 Domains 包含 "*" 时为 nil。
 	// 注意：该 map 只读（在启动时构建），可被并发安全读取。
 	DomainSet map[string]struct{}

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"strings"
 	"time"
@@ -69,6 +70,8 @@ type createAccountRequest struct {
 	LocalPart          string `json:"localPart"`
 	Domain             string `json:"domain"`
 	Subdomain          string `json:"subdomain"`
+	WildcardRuleID     string `json:"wildcardRuleId"`
+	SubdomainLabel     string `json:"subdomainLabel"`
 	AutoDomainStrategy string `json:"autoDomainStrategy"`
 }
 
@@ -224,11 +227,16 @@ func New(cfg Config) http.Handler {
 	r.Use(api.apiKeyRateLimit())
 
 	r.GET("/v1/domains", api.listDomains)
+	r.GET("/v1/me/domains", api.requireAnyAuth(), api.listDomains)
+	r.GET("/v1/me/wildcard-rules", api.requireAnyAuth(), api.listWildcardRules)
+	r.GET("/v1/me/quota", api.requireAnyAuth(), api.getQuota)
 	r.GET("/v1/plans", api.listPlans)
 	r.GET("/v1/pricing", api.getPricing)
 	r.GET("/v1/domain-reward/config", api.getDomainRewardConfig)
 	r.GET("/v1/stats", api.getStats)
 	r.GET("/v1/llms.txt", api.getLLMsText)
+	r.GET("/v1/auth/ws-ticket", api.requireAnyAuth(), api.createWSTicket)
+	r.GET("/v1/ws", api.handleWS)
 
 	r.POST("/v1/accounts", api.requireCreateAccountAuth(), api.createAccount)
 	r.POST("/v1/accounts/wildcard", api.requireCreateAccountAuth(), api.createWildcardAccount)
@@ -240,6 +248,7 @@ func New(cfg Config) http.Handler {
 	r.GET("/v1/messages", api.requireAnyAuth(), api.listMessages)
 	r.POST("/v1/messages/mark-read", api.requireAnyAuth(), api.markMessagesRead)
 	r.GET("/v1/messages/:id", api.requireAnyAuth(), api.getMessage)
+	r.GET("/v1/messages/:id/source", api.requireAnyAuth(), api.getMessageSource)
 	r.PATCH("/v1/messages/:id", api.requireAnyAuth(), api.updateMessage)
 	r.DELETE("/v1/messages/:id", api.requireAnyAuth(), api.deleteMessage)
 	r.GET("/v1/sources/:id", api.requireAnyAuth(), api.getMessageSource)
@@ -410,6 +419,60 @@ func (a *API) listDomains(c *gin.Context) {
 	}
 
 	writeSuccess(c, http.StatusOK, resp)
+}
+
+func (a *API) listWildcardRules(c *gin.Context) {
+	domains, err := a.visibleDomains(c.Request.Context(), c)
+	if err != nil {
+		abortError(c, http.StatusInternalServerError, "internal_error", "Failed to list wildcard rules")
+		return
+	}
+
+	resp := make([]gin.H, 0, len(domains))
+	for _, d := range domains {
+		name := strings.ToLower(strings.TrimSpace(d.Domain))
+		if name == "" {
+			continue
+		}
+
+		resp = append(resp, gin.H{
+			"id":        name,
+			"domain":    name,
+			"isActive":  d.IsActive,
+			"isPublic":  !d.IsPrivate,
+			"createdAt": d.CreatedAt,
+			"updatedAt": d.UpdatedAt,
+		})
+	}
+
+	writeSuccess(c, http.StatusOK, resp)
+}
+
+func (a *API) getQuota(c *gin.Context) {
+	plan := a.effectiveQuotaPlan()
+	dimensions := gin.H{
+		"maxDomains":         plan.MaxDomains,
+		"maxInboxes":         plan.MaxInboxes,
+		"maxApiKeys":         plan.MaxAPIKeys,
+		"maxSubdomainDepth":  plan.MaxSubdomainDepth,
+		"maxMessagesPerDay":  plan.MaxMessagesPerDay,
+		"maxApiCallsDaily":   plan.MaxAPICallsDaily,
+		"maxApiCallsWeekly":  plan.MaxAPICallsWeekly,
+		"maxApiCallsMonthly": plan.MaxAPICallsMonthly,
+		"maxWebhooks":        plan.MaxWebhooks,
+		"maxWildcardRules":   plan.MaxWildcardRules,
+		"retentionDays":      plan.RetentionDays,
+		"storageBytes":       plan.StorageBytes,
+		"maxRps":             plan.MaxRPS,
+	}
+
+	writeSuccess(c, http.StatusOK, gin.H{
+		"plan":          plan,
+		"dimensions":    dimensions,
+		"bonusDaily":    0,
+		"purchasedPool": 0,
+		"wildcardRules": plan.MaxWildcardRules,
+	})
 }
 
 func (a *API) listPlans(c *gin.Context) {
@@ -811,6 +874,9 @@ This llms.txt documents the public yyds-compatible surface implemented by MailAP
 
 Public query endpoints:
 - GET /v1/domains
+- GET /v1/me/domains
+- GET /v1/me/wildcard-rules
+- GET /v1/me/quota
 - GET /v1/plans
 - GET /v1/pricing
 - GET /v1/domain-reward/config
@@ -831,9 +897,11 @@ Public query endpoints:
 
 Notes:
 - POST /v1/accounts accepts localPart, address, domain, and subdomain.
+- wildcardRuleId and subdomainLabel remain accepted for legacy callers.
 - localPart is preferred; address remains accepted for compatibility.
 - subdomain is appended as a child-domain under the selected parent domain.
-- POST /v1/accounts/wildcard uses the requested child-domain, or a random child-domain when subdomain is omitted.
+- When domain is omitted, the API key default domain is used first; otherwise autoDomainStrategy selects from visible domains.
+- POST /v1/accounts/wildcard uses the requested child-domain, or the default/random child-domain when subdomain is omitted.
 - Wildcard child-domains require the parent domain's DNS/MX wildcard to already route to this MailAPI deployment.
 - POST /v1/token refreshes a temp token by address. Unauthenticated access is only allowed for public domains.
 
@@ -841,9 +909,18 @@ Notes:
 - GET    /v1/messages
 - POST   /v1/messages/mark-read
 - GET    /v1/messages/{id}
+- GET    /v1/messages/{id}/source
 - PATCH  /v1/messages/{id}
 - DELETE /v1/messages/{id}
 - GET    /v1/sources/{id}
+
+Message notes:
+- GET /v1/messages and POST /v1/messages/mark-read accept address as a query parameter.
+- For wildcard inboxes, always use the final address returned by account creation.
+
+## Realtime
+- GET /v1/auth/ws-ticket
+- GET /v1/ws
 
 ## Error Handling
 All errors follow the same envelope:
@@ -896,6 +973,12 @@ func (a *API) resolveCreateAddress(c *gin.Context, req createAccountRequest, for
 	localPart := strings.TrimSpace(req.LocalPart)
 	requestedDomain := strings.ToLower(strings.TrimSpace(req.Domain))
 	subdomain := strings.ToLower(strings.TrimSpace(req.Subdomain))
+	if subdomain == "" {
+		subdomain = strings.ToLower(strings.TrimSpace(req.SubdomainLabel))
+	}
+	if requestedDomain == "" {
+		requestedDomain = strings.ToLower(strings.TrimSpace(req.WildcardRuleID))
+	}
 
 	if strings.Contains(rawAddress, "@") {
 		address := strings.ToLower(rawAddress)
@@ -909,13 +992,9 @@ func (a *API) resolveCreateAddress(c *gin.Context, req createAccountRequest, for
 		localPart = rawAddress
 	}
 
-	if subdomain != "" && requestedDomain == "" {
-		return "", false, &apiError{status: http.StatusBadRequest, code: "domain_required", message: "domain is required when subdomain is provided"}
-	}
-
 	targetDomain := requestedDomain
 	if targetDomain == "" {
-		domain, errResp := a.defaultDomainForCreate(c)
+		domain, errResp := a.defaultDomainForCreate(c, req.AutoDomainStrategy, forceWildcard)
 		if errResp != nil {
 			return "", false, errResp
 		}
@@ -923,11 +1002,14 @@ func (a *API) resolveCreateAddress(c *gin.Context, req createAccountRequest, for
 	}
 
 	if forceWildcard && subdomain == "" {
-		generatedSubdomain, err := randomChildDomainLabel()
-		if err != nil {
-			return "", false, &apiError{status: http.StatusInternalServerError, code: "internal_error", message: "Failed to create wildcard inbox"}
+		subdomain = a.defaultSubdomainForCreate(c)
+		if subdomain == "" {
+			generatedSubdomain, err := randomChildDomainLabel()
+			if err != nil {
+				return "", false, &apiError{status: http.StatusInternalServerError, code: "internal_error", message: "Failed to create wildcard inbox"}
+			}
+			subdomain = generatedSubdomain
 		}
-		subdomain = generatedSubdomain
 	}
 
 	if subdomain != "" {
@@ -950,15 +1032,118 @@ func (a *API) resolveCreateAddress(c *gin.Context, req createAccountRequest, for
 	return strings.ToLower(localPart + "@" + targetDomain), autoGenerated, nil
 }
 
-func (a *API) defaultDomainForCreate(c *gin.Context) (string, *apiError) {
-	domains, err := a.visibleDomains(c.Request.Context(), c)
-	if err != nil {
-		return "", &apiError{status: http.StatusInternalServerError, code: "internal_error", message: "Failed to load domains"}
+func (a *API) defaultDomainForCreate(c *gin.Context, autoDomainStrategy string, forceWildcard bool) (string, *apiError) {
+	if domain, ok := a.defaultDomainFromContext(c); ok {
+		return domain, nil
+	}
+
+	domains, errResp := a.candidateDomainsForCreate(c, autoDomainStrategy)
+	if errResp != nil {
+		return "", errResp
 	}
 	if len(domains) == 0 {
 		return "", &apiError{status: http.StatusBadRequest, code: "domain_not_available", message: "No domain available for inbox creation"}
 	}
-	return strings.ToLower(domains[0].Domain), nil
+
+	if !forceWildcard {
+		return domains[0], nil
+	}
+
+	idx, err := randomIntn(len(domains))
+	if err != nil {
+		return "", &apiError{status: http.StatusInternalServerError, code: "internal_error", message: "Failed to select wildcard domain"}
+	}
+	return domains[idx], nil
+}
+
+func (a *API) defaultDomainFromContext(c *gin.Context) (string, bool) {
+	info := middleware.GetAPIKeyInfo(c)
+	if info == nil {
+		return "", false
+	}
+
+	domain := strings.ToLower(strings.TrimSpace(info.DefaultDomain))
+	if domain == "" {
+		return "", false
+	}
+	if _, _, errResp := a.ensureDomainAccessible(c, domain, true); errResp != nil {
+		return "", false
+	}
+	return domain, true
+}
+
+func (a *API) defaultSubdomainForCreate(c *gin.Context) string {
+	info := middleware.GetAPIKeyInfo(c)
+	if info == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(info.DefaultSubdomain))
+}
+
+func (a *API) candidateDomainsForCreate(c *gin.Context, autoDomainStrategy string) ([]string, *apiError) {
+	domains, err := a.visibleDomains(c.Request.Context(), c)
+	if err != nil {
+		return nil, &apiError{status: http.StatusInternalServerError, code: "internal_error", message: "Failed to load domains"}
+	}
+
+	out := make([]string, 0, len(domains))
+	publicDomains := make([]string, 0, len(domains))
+	explicitDomains := make([]string, 0, len(domains))
+	others := make([]string, 0, len(domains))
+	seen := make(map[string]struct{}, len(domains))
+
+	for _, d := range domains {
+		name := strings.ToLower(strings.TrimSpace(d.Domain))
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+
+		if !d.IsPrivate {
+			publicDomains = append(publicDomains, name)
+		}
+		if middleware.IsDomainExplicitlyAllowed(c, name) {
+			explicitDomains = append(explicitDomains, name)
+		} else {
+			others = append(others, name)
+		}
+	}
+
+	switch strings.ToLower(strings.TrimSpace(autoDomainStrategy)) {
+	case "", "balanced":
+		return out, nil
+	case "prefer_public":
+		if len(publicDomains) == 0 {
+			return out, nil
+		}
+		rest := make([]string, 0, len(out)-len(publicDomains))
+		for _, name := range out {
+			if !containsDomain(publicDomains, name) {
+				rest = append(rest, name)
+			}
+		}
+		return append(publicDomains, rest...), nil
+	case "prefer_owned":
+		if len(explicitDomains) == 0 {
+			return out, nil
+		}
+		return append(explicitDomains, others...), nil
+	default:
+		return nil, &apiError{status: http.StatusBadRequest, code: "invalid_auto_domain_strategy", message: "Invalid autoDomainStrategy"}
+	}
+}
+
+func containsDomain(domains []string, target string) bool {
+	for _, domain := range domains {
+		if domain == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *API) ensureDomainAccessible(c *gin.Context, domain string, allowAnonymousPublic bool) (*model.Domain, string, *apiError) {
@@ -1101,14 +1286,22 @@ func (a *API) accountFromAddressBodyOrToken(c *gin.Context) (*model.Account, *ap
 			return nil, errResp
 		}
 
+		addr := strings.ToLower(strings.TrimSpace(c.Query("address")))
 		var req addressRequest
-		if c.Request.Body != nil {
+		if addr == "" && c.Request.Body != nil {
 			_ = c.ShouldBindJSON(&req)
 		}
-		if addr := strings.ToLower(strings.TrimSpace(req.Address)); addr != "" && addr != strings.ToLower(account.Address) {
+		if addr == "" {
+			addr = strings.ToLower(strings.TrimSpace(req.Address))
+		}
+		if addr != "" && addr != strings.ToLower(account.Address) {
 			return nil, &apiError{status: http.StatusForbidden, code: "forbidden", message: "Address does not match temp token"}
 		}
 		return account, nil
+	}
+
+	if addr := strings.ToLower(strings.TrimSpace(c.Query("address"))); addr != "" {
+		return a.lookupAccountByAddress(c, addr, true)
 	}
 
 	var req addressRequest
@@ -1307,6 +1500,33 @@ func bearerTokenFromAuthorization(header string) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSpace(header[6:]), true
+}
+
+func (a *API) effectiveQuotaPlan() config.YYDSPlanConfig {
+	for _, plan := range a.public.Plans {
+		if plan.IsActive {
+			return plan
+		}
+	}
+	if len(a.public.Plans) > 0 {
+		return a.public.Plans[0]
+	}
+	return config.YYDSPlanConfig{}
+}
+
+func randomIntn(n int) (int, error) {
+	if n <= 0 {
+		return 0, fmt.Errorf("n must be > 0")
+	}
+	if n == 1 {
+		return 0, nil
+	}
+
+	value, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
+	if err != nil {
+		return 0, err
+	}
+	return int(value.Int64()), nil
 }
 
 func randomPassword() (string, error) {

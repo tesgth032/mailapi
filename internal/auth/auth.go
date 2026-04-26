@@ -33,12 +33,20 @@ func New(secret string, expiry time.Duration) *Auth {
 }
 
 func (a *Auth) GenerateToken(accountID, address string) (string, error) {
+	return a.GenerateTokenWithExpiry(accountID, address, a.expiry)
+}
+
+func (a *Auth) GenerateTokenWithExpiry(accountID, address string, expiry time.Duration) (string, error) {
+	if expiry <= 0 {
+		expiry = a.expiry
+	}
+
 	now := time.Now()
 	claims := &Claims{
 		AccountID: accountID,
 		Address:   address,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(now.Add(a.expiry)),
+			ExpiresAt: jwt.NewNumericDate(now.Add(expiry)),
 			IssuedAt:  jwt.NewNumericDate(now),
 			NotBefore: jwt.NewNumericDate(now),
 		},

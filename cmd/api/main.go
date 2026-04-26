@@ -191,13 +191,18 @@ func main() {
 			}
 		}
 
+		defaultDomain := strings.ToLower(strings.TrimSpace(ak.DefaultDomain))
+		defaultSubdomain := strings.ToLower(strings.TrimSpace(ak.DefaultSubdomain))
+
 		apiKeys[ak.Key] = &middleware.APIKeyInfo{
-			Name:         ak.Name,
-			Domains:      domains,
-			DomainSet:    domainSet,
-			Wildcard:     wildcard,
-			RPMLimit:     ak.RPMLimit,
-			DomainLimits: domainLimits,
+			Name:             ak.Name,
+			Domains:          domains,
+			DefaultDomain:    defaultDomain,
+			DefaultSubdomain: defaultSubdomain,
+			DomainSet:        domainSet,
+			Wildcard:         wildcard,
+			RPMLimit:         ak.RPMLimit,
+			DomainLimits:     domainLimits,
 		}
 	}
 	if len(apiKeys) > 0 {

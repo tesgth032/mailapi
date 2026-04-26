@@ -122,7 +122,8 @@ dialects:
 补充说明：
 
 - `yyds` 当前实现的是 YYDS Mail 文档中的“公共临时邮箱/公共元数据”子集；其站内控制台、计费、Webhook、DNS 自动化等功能不在本仓库内实现。
-- `/v1/accounts/wildcard` 仅支持“目标子域已预先配置为接收域名”的场景；`mailapi` 不会自动创建 wildcard 子域的 DNS/MX/SMTP 接收能力。
+- `/v1/accounts/wildcard` 已支持基于已配置父域动态创建 child-domain 邮箱；若省略 `subdomain`，服务端会自动生成随机 child-domain。
+- 前提是父域已经配置到 `mailapi`，并且外部 DNS / MX 的泛解析（例如 `*.example.com`）已经指向当前 SMTP 服务；`mailapi` 只负责服务端接收与存储，不负责代管 DNS。
 
 完整说明见：[yyds.md](yyds.md)。
 

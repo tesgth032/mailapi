@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"mailapi/internal/cache"
+	"mailapi/internal/domainutil"
 	"mailapi/internal/model"
 	"mailapi/internal/queue"
 	"mailapi/internal/store"
@@ -81,7 +82,11 @@ func NewBackend(c cache.Interface, q queue.Interface, lookup RecipientLookup, ac
 	if len(allowedDomains) > 0 {
 		set := make(map[string]struct{}, len(allowedDomains))
 		for _, d := range allowedDomains {
-			set[strings.ToLower(d)] = struct{}{}
+			normalized := domainutil.Normalize(d)
+			if normalized == "" {
+				continue
+			}
+			set[normalized] = struct{}{}
 		}
 		b.allowedSet = set
 	}
@@ -154,7 +159,7 @@ func (s *Session) Rcpt(to string, opts *gosmtp.RcptOptions) error {
 	// Check if domain is allowed on this listener
 	if len(s.backend.allowedSet) > 0 {
 		domain := domainFromAddress(addr)
-		if _, ok := s.backend.allowedSet[domain]; !ok {
+		if !domainAllowed(s.backend.allowedSet, domain) {
 			return &gosmtp.SMTPError{
 				Code:         550,
 				EnhancedCode: gosmtp.EnhancedCode{5, 1, 1},
@@ -552,6 +557,14 @@ func domainFromAddress(addr string) string {
 		return strings.ToLower(addr[i+1:])
 	}
 	return ""
+}
+
+func domainAllowed(allowedSet map[string]struct{}, domain string) bool {
+	if len(allowedSet) == 0 {
+		return true
+	}
+	_, ok := domainutil.MatchSet(domain, allowedSet)
+	return ok
 }
 
 func normalizeListenAddr(ip string, defaultPort int) (string, error) {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"mailapi/internal/auth"
 	"mailapi/internal/cache"
 	"mailapi/internal/config"
+	"mailapi/internal/middleware"
 	"mailapi/internal/model"
 	"mailapi/internal/prefix"
 	"mailapi/internal/store"
@@ -258,8 +260,14 @@ func TestCreateAccount_OpenModeReturnsToken(t *testing.T) {
 	now := time.Date(2026, 4, 27, 9, 0, 0, 0, time.UTC)
 	accountID := bson.NewObjectID()
 	st := &testStore{
+		listDomainsFunc: func(ctx context.Context) ([]model.Domain, error) {
+			return []model.Domain{{Domain: "example.com", IsActive: true}}, nil
+		},
 		getDomainByNameFunc: func(ctx context.Context, domain string) (*model.Domain, error) {
-			return &model.Domain{Domain: "example.com", IsActive: true}, nil
+			if domain == "example.com" {
+				return &model.Domain{Domain: "example.com", IsActive: true}, nil
+			}
+			return nil, store.ErrNotFound
 		},
 		createAccountFunc: func(ctx context.Context, account *model.Account) error {
 			account.ID = accountID
@@ -298,8 +306,14 @@ func TestCreateAccount_OpenModeReturnsToken(t *testing.T) {
 func TestCreateToken_PublicDomainNoAuth(t *testing.T) {
 	accountID := bson.NewObjectID()
 	st := &testStore{
+		listDomainsFunc: func(ctx context.Context) ([]model.Domain, error) {
+			return []model.Domain{{Domain: "example.com", IsActive: true}}, nil
+		},
 		getDomainByNameFunc: func(ctx context.Context, domain string) (*model.Domain, error) {
-			return &model.Domain{Domain: "example.com", IsActive: true}, nil
+			if domain == "example.com" {
+				return &model.Domain{Domain: "example.com", IsActive: true}, nil
+			}
+			return nil, store.ErrNotFound
 		},
 		getAccountByAddressFunc: func(ctx context.Context, address string) (*model.Account, error) {
 			return &model.Account{ID: accountID, Address: "demo@example.com"}, nil
@@ -324,6 +338,122 @@ func TestCreateToken_PublicDomainNoAuth(t *testing.T) {
 	}
 	if resp.Data.Address != "demo@example.com" {
 		t.Fatalf("address=%q", resp.Data.Address)
+	}
+}
+
+func TestCreateWildcardAccount_UsesConfiguredParentDomain(t *testing.T) {
+	now := time.Date(2026, 4, 27, 10, 0, 0, 0, time.UTC)
+	accountID := bson.NewObjectID()
+	var createdAddress string
+	st := &testStore{
+		listDomainsFunc: func(ctx context.Context) ([]model.Domain, error) {
+			return []model.Domain{{Domain: "example.com", IsActive: true}}, nil
+		},
+		getDomainByNameFunc: func(ctx context.Context, domain string) (*model.Domain, error) {
+			if domain == "example.com" {
+				return &model.Domain{Domain: "example.com", IsActive: true}, nil
+			}
+			return nil, store.ErrNotFound
+		},
+		createAccountFunc: func(ctx context.Context, account *model.Account) error {
+			createdAddress = account.Address
+			account.ID = accountID
+			account.CreatedAt = now
+			return nil
+		},
+	}
+	h := newTestServer(t, st, &testCache{})
+
+	w := performJSON(h, http.MethodPost, "/v1/accounts/wildcard", `{"localPart":"demo","domain":"example.com","subdomain":"mail"}`, nil)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if createdAddress != "demo@mail.example.com" {
+		t.Fatalf("createdAddress=%q", createdAddress)
+	}
+}
+
+func TestCreateWildcardAccount_GeneratesRandomChildDomain(t *testing.T) {
+	now := time.Date(2026, 4, 27, 10, 30, 0, 0, time.UTC)
+	accountID := bson.NewObjectID()
+	var createdAddress string
+	st := &testStore{
+		listDomainsFunc: func(ctx context.Context) ([]model.Domain, error) {
+			return []model.Domain{{Domain: "example.com", IsActive: true}}, nil
+		},
+		getDomainByNameFunc: func(ctx context.Context, domain string) (*model.Domain, error) {
+			if domain == "example.com" {
+				return &model.Domain{Domain: "example.com", IsActive: true}, nil
+			}
+			return nil, store.ErrNotFound
+		},
+		createAccountFunc: func(ctx context.Context, account *model.Account) error {
+			createdAddress = account.Address
+			account.ID = accountID
+			account.CreatedAt = now
+			return nil
+		},
+	}
+	h := newTestServer(t, st, &testCache{})
+
+	w := performJSON(h, http.MethodPost, "/v1/accounts/wildcard", `{"localPart":"demo","domain":"example.com"}`, nil)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.HasPrefix(createdAddress, "demo@w") || !strings.HasSuffix(createdAddress, ".example.com") {
+		t.Fatalf("createdAddress=%q", createdAddress)
+	}
+	re := regexp.MustCompile(`^demo@w[0-9a-f]{12}\.example\.com$`)
+	if !re.MatchString(createdAddress) {
+		t.Fatalf("createdAddress=%q does not match generated child-domain pattern", createdAddress)
+	}
+}
+
+func TestCreateWildcardAccount_PrivateParentRequiresExplicitAPIKeyAuthorization(t *testing.T) {
+	now := time.Date(2026, 4, 27, 11, 0, 0, 0, time.UTC)
+	accountID := bson.NewObjectID()
+	var createdAddress string
+	st := &testStore{
+		listDomainsFunc: func(ctx context.Context) ([]model.Domain, error) {
+			return []model.Domain{{Domain: "example.com", IsActive: true, IsPrivate: true}}, nil
+		},
+		getDomainByNameFunc: func(ctx context.Context, domain string) (*model.Domain, error) {
+			if domain == "example.com" {
+				return &model.Domain{Domain: "example.com", IsActive: true, IsPrivate: true}, nil
+			}
+			return nil, store.ErrNotFound
+		},
+		createAccountFunc: func(ctx context.Context, account *model.Account) error {
+			createdAddress = account.Address
+			account.ID = accountID
+			account.CreatedAt = now
+			return nil
+		},
+	}
+	h := New(Config{
+		Store:      st,
+		Cache:      &testCache{},
+		Storage:    &testStorage{},
+		Auth:       auth.New("test-secret", time.Hour),
+		AccountTTL: 24 * time.Hour,
+		APIKeys: map[string]*middleware.APIKeyInfo{
+			"test-key": {
+				Name:    "Test",
+				Domains: []string{"example.com"},
+			},
+		},
+		Prefix: prefix.New(),
+		Public: config.YYDSDialectConfig{},
+	})
+
+	w := performJSON(h, http.MethodPost, "/v1/accounts/wildcard", `{"localPart":"demo","domain":"example.com","subdomain":"mail"}`, map[string]string{
+		"X-API-Key": "test-key",
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if createdAddress != "demo@mail.example.com" {
+		t.Fatalf("createdAddress=%q", createdAddress)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"mailapi/internal/auth"
 	"mailapi/internal/cache"
 	"mailapi/internal/config"
+	"mailapi/internal/domainutil"
 	"mailapi/internal/handler"
 	"mailapi/internal/middleware"
 	"mailapi/internal/model"
@@ -831,7 +832,9 @@ Public query endpoints:
 Notes:
 - POST /v1/accounts accepts localPart, address, domain, and subdomain.
 - localPart is preferred; address remains accepted for compatibility.
-- /v1/accounts/wildcard only supports child domains that are already configured as receive domains in MailAPI.
+- subdomain is appended as a child-domain under the selected parent domain.
+- POST /v1/accounts/wildcard uses the requested child-domain, or a random child-domain when subdomain is omitted.
+- Wildcard child-domains require the parent domain's DNS/MX wildcard to already route to this MailAPI deployment.
 - POST /v1/token refreshes a temp token by address. Unauthenticated access is only allowed for public domains.
 
 ## Messages
@@ -910,10 +913,6 @@ func (a *API) resolveCreateAddress(c *gin.Context, req createAccountRequest, for
 		return "", false, &apiError{status: http.StatusBadRequest, code: "domain_required", message: "domain is required when subdomain is provided"}
 	}
 
-	if forceWildcard && subdomain == "" {
-		return "", false, &apiError{status: http.StatusBadRequest, code: "subdomain_required_for_mailapi_wildcard", message: "mailapi requires an explicit preconfigured child domain for wildcard inbox creation"}
-	}
-
 	targetDomain := requestedDomain
 	if targetDomain == "" {
 		domain, errResp := a.defaultDomainForCreate(c)
@@ -922,11 +921,23 @@ func (a *API) resolveCreateAddress(c *gin.Context, req createAccountRequest, for
 		}
 		targetDomain = domain
 	}
+
+	if forceWildcard && subdomain == "" {
+		generatedSubdomain, err := randomChildDomainLabel()
+		if err != nil {
+			return "", false, &apiError{status: http.StatusInternalServerError, code: "internal_error", message: "Failed to create wildcard inbox"}
+		}
+		subdomain = generatedSubdomain
+	}
+
 	if subdomain != "" {
+		if errResp := validateWildcardSubdomain(subdomain); errResp != nil {
+			return "", false, errResp
+		}
 		targetDomain = subdomain + "." + targetDomain
 	}
 
-	if _, errResp := a.ensureDomainAccessible(c, targetDomain, true); errResp != nil {
+	if _, _, errResp := a.ensureDomainAccessible(c, targetDomain, true); errResp != nil {
 		return "", false, errResp
 	}
 
@@ -950,35 +961,50 @@ func (a *API) defaultDomainForCreate(c *gin.Context) (string, *apiError) {
 	return strings.ToLower(domains[0].Domain), nil
 }
 
-func (a *API) ensureDomainAccessible(c *gin.Context, domain string, allowAnonymousPublic bool) (*model.Domain, *apiError) {
+func (a *API) ensureDomainAccessible(c *gin.Context, domain string, allowAnonymousPublic bool) (*model.Domain, string, *apiError) {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	if domain == "" {
-		return nil, &apiError{status: http.StatusBadRequest, code: "domain_required", message: "domain is required"}
+		return nil, "", &apiError{status: http.StatusBadRequest, code: "domain_required", message: "domain is required"}
 	}
 
-	di, err := a.store.GetDomainByName(c.Request.Context(), domain)
-	if err != nil {
-		if err == store.ErrNotFound {
-			return nil, &apiError{status: http.StatusBadRequest, code: "domain_not_available", message: "Domain not available"}
+	var (
+		di            *model.Domain
+		matchedDomain string
+	)
+	for _, candidate := range domainutil.Candidates(domain) {
+		found, err := a.store.GetDomainByName(c.Request.Context(), candidate)
+		if err == nil {
+			di = found
+			matchedDomain = candidate
+			break
 		}
-		return nil, &apiError{status: http.StatusInternalServerError, code: "internal_error", message: "Failed to load domain"}
+		if err != store.ErrNotFound {
+			return nil, "", &apiError{status: http.StatusInternalServerError, code: "internal_error", message: "Failed to load domain"}
+		}
+	}
+	if di == nil {
+		return nil, "", &apiError{status: http.StatusBadRequest, code: "domain_not_available", message: "Domain not available"}
 	}
 
 	switch a.authKind(c) {
-	case authKindAPIKey, authKindToken:
+	case authKindAPIKey:
 		if !middleware.IsDomainAllowed(c, domain) {
-			return nil, &apiError{status: http.StatusForbidden, code: "domain_not_allowed", message: "Domain not allowed for this API key"}
+			return nil, "", &apiError{status: http.StatusForbidden, code: "domain_not_allowed", message: "Domain not allowed for this API key"}
 		}
-		if di.IsPrivate && !middleware.IsDomainExplicitlyAllowed(c, domain) {
-			return nil, &apiError{status: http.StatusForbidden, code: "private_domain_requires_explicit_authorization", message: "Private domain requires explicit authorization"}
+		if di.IsPrivate && !middleware.IsDomainExplicitlyAllowed(c, matchedDomain) {
+			return nil, "", &apiError{status: http.StatusForbidden, code: "private_domain_requires_explicit_authorization", message: "Private domain requires explicit authorization"}
+		}
+	case authKindToken:
+		if !middleware.IsDomainAllowed(c, domain) {
+			return nil, "", &apiError{status: http.StatusForbidden, code: "domain_not_allowed", message: "Domain not allowed for this temp token"}
 		}
 	default:
 		if di.IsPrivate || !allowAnonymousPublic {
-			return nil, &apiError{status: http.StatusForbidden, code: "domain_not_public", message: "Domain is not available for anonymous access"}
+			return nil, "", &apiError{status: http.StatusForbidden, code: "domain_not_public", message: "Domain is not available for anonymous access"}
 		}
 	}
 
-	return di, nil
+	return di, matchedDomain, nil
 }
 
 func (a *API) checkDomainAccessibleForAddress(c *gin.Context, address string, allowAnonymousPublic bool) (*model.Domain, *apiError) {
@@ -987,7 +1013,8 @@ func (a *API) checkDomainAccessibleForAddress(c *gin.Context, address string, al
 	if domain == "" {
 		return nil, &apiError{status: http.StatusBadRequest, code: "invalid_address", message: "Invalid address"}
 	}
-	return a.ensureDomainAccessible(c, domain, allowAnonymousPublic)
+	di, _, errResp := a.ensureDomainAccessible(c, domain, allowAnonymousPublic)
+	return di, errResp
 }
 
 func (a *API) lookupAccountByAddress(c *gin.Context, address string, authRequired bool) (*model.Account, *apiError) {
@@ -1288,6 +1315,53 @@ func randomPassword() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(buf[:]), nil
+}
+
+func randomChildDomainLabel() (string, error) {
+	var buf [6]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return "w" + hex.EncodeToString(buf[:]), nil
+}
+
+func validateWildcardSubdomain(subdomain string) *apiError {
+	subdomain = strings.ToLower(strings.TrimSpace(subdomain))
+	if subdomain == "" {
+		return &apiError{status: http.StatusBadRequest, code: "invalid_subdomain", message: "Invalid subdomain"}
+	}
+	if strings.HasPrefix(subdomain, ".") || strings.HasSuffix(subdomain, ".") || strings.Contains(subdomain, "..") {
+		return &apiError{status: http.StatusBadRequest, code: "invalid_subdomain", message: "Invalid subdomain"}
+	}
+
+	for _, label := range strings.Split(subdomain, ".") {
+		if !isDNSLabel(label) {
+			return &apiError{status: http.StatusBadRequest, code: "invalid_subdomain", message: "Invalid subdomain"}
+		}
+	}
+	return nil
+}
+
+func isDNSLabel(label string) bool {
+	if len(label) == 0 || len(label) > 63 {
+		return false
+	}
+	if label[0] == '-' || label[len(label)-1] == '-' {
+		return false
+	}
+	for _, ch := range label {
+		if ch >= 'a' && ch <= 'z' {
+			continue
+		}
+		if ch >= '0' && ch <= '9' {
+			continue
+		}
+		if ch == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func objectIDString(id bson.ObjectID) string {

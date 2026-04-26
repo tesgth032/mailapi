@@ -292,6 +292,46 @@ func TestSession_Rcpt_MultipleRecipients(t *testing.T) {
 	}
 }
 
+func TestSession_Rcpt_AllowsChildDomainWhenParentConfigured(t *testing.T) {
+	mc := &mockSMTPCache{
+		hasAddressFunc: func(ctx context.Context, addr string) (bool, error) {
+			return true, nil
+		},
+	}
+	b := NewBackend(mc, &mockSMTPQueue{}, nil, 24*time.Hour, false, "test.example.com", []string{"example.com"}, 20<<20)
+	s := &Session{backend: b, remoteAddr: "127.0.0.1:12345"}
+
+	err := s.Rcpt("User@Mail.Example.com", &gosmtp.RcptOptions{})
+	if err != nil {
+		t.Fatalf("Rcpt: %v", err)
+	}
+	if len(s.to) != 1 || s.to[0] != "user@mail.example.com" {
+		t.Fatalf("to=%v want [user@mail.example.com]", s.to)
+	}
+}
+
+func TestSession_Rcpt_RejectsDomainOutsideConfiguredParent(t *testing.T) {
+	mc := &mockSMTPCache{
+		hasAddressFunc: func(ctx context.Context, addr string) (bool, error) {
+			return true, nil
+		},
+	}
+	b := NewBackend(mc, &mockSMTPQueue{}, nil, 24*time.Hour, false, "test.example.com", []string{"example.com"}, 20<<20)
+	s := &Session{backend: b, remoteAddr: "127.0.0.1:12345"}
+
+	err := s.Rcpt("user@other.com", &gosmtp.RcptOptions{})
+	if err == nil {
+		t.Fatal("expected domain rejection")
+	}
+	var smtpErr *gosmtp.SMTPError
+	if !errors.As(err, &smtpErr) {
+		t.Fatalf("expected SMTPError, got %T", err)
+	}
+	if smtpErr.Code != 550 {
+		t.Fatalf("code=%d want=550", smtpErr.Code)
+	}
+}
+
 func TestSession_Data_Success(t *testing.T) {
 	mc := &mockSMTPCache{
 		hasAddressFunc: func(ctx context.Context, addr string) (bool, error) {
@@ -363,6 +403,18 @@ func TestNormalizeListenAddr(t *testing.T) {
 		if got != tc.want {
 			t.Fatalf("in=%q got=%q want=%q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestDomainAllowed(t *testing.T) {
+	allowed := map[string]struct{}{
+		"example.com": {},
+	}
+	if !domainAllowed(allowed, "mail.example.com") {
+		t.Fatal("expected child domain to be allowed")
+	}
+	if domainAllowed(allowed, "other.com") {
+		t.Fatal("expected unrelated domain to be rejected")
 	}
 }
 

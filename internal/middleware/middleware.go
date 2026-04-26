@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"mailapi/internal/auth"
+	"mailapi/internal/domainutil"
 
 	"github.com/gin-gonic/gin"
 )
@@ -225,12 +226,17 @@ func CheckDomainRateLimit(c *gin.Context, ca KeyRateLimitChecker, domain string)
 	info := val.(*APIKeyInfo)
 	apiKey := c.GetString(CtxAPIKey)
 
-	limit, ok := info.DomainLimits[domain]
+	match, ok := domainutil.MatchMapKey(domain, info.DomainLimits)
+	if !ok {
+		return true
+	}
+
+	limit, ok := info.DomainLimits[match]
 	if !ok || limit <= 0 {
 		return true
 	}
 
-	allowed, err := ca.CheckKeyDomainRateLimit(c.Request.Context(), apiKey, domain, limit, time.Minute)
+	allowed, err := ca.CheckKeyDomainRateLimit(c.Request.Context(), apiKey, match, limit, time.Minute)
 	if err != nil {
 		return true // fail open
 	}
@@ -268,29 +274,35 @@ func DomainFromAddress(address string) string {
 // IsDomainAllowed checks whether the given domain is permitted by the
 // API key context on this request.
 func IsDomainAllowed(c *gin.Context, domain string) bool {
+	domain = domainutil.Normalize(domain)
+	if domain == "" {
+		return false
+	}
+
 	if info := GetAPIKeyInfo(c); info != nil {
 		if info.Wildcard {
 			return true
 		}
 		if info.DomainSet != nil {
-			_, ok := info.DomainSet[domain]
+			_, ok := domainutil.MatchSet(domain, info.DomainSet)
 			return ok
 		}
-		// 回退：无 DomainSet 时按 Domains 切片匹配（通常 domains 很少）。
 		for _, d := range info.Domains {
-			if d == "*" || d == domain {
+			if domainutil.Normalize(d) == "*" {
 				return true
 			}
 		}
-		return false
+		_, ok := domainutil.MatchSlice(domain, info.Domains)
+		return ok
 	}
 
 	for _, d := range GetAllowedDomains(c) {
-		if d == "*" || d == domain {
+		if domainutil.Normalize(d) == "*" {
 			return true
 		}
 	}
-	return false
+	_, ok := domainutil.MatchSlice(domain, GetAllowedDomains(c))
+	return ok
 }
 
 // IsDomainExplicitlyAllowed 判断 domain 是否被“显式授权”。

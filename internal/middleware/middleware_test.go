@@ -358,13 +358,15 @@ type mockKeyRateLimiter struct {
 	keyErr        error
 	domainAllowed bool
 	domainErr     error
+	lastDomain    string
 }
 
 func (m *mockKeyRateLimiter) CheckKeyRateLimit(_ context.Context, _ string, _ int64, _ time.Duration) (bool, error) {
 	return m.keyAllowed, m.keyErr
 }
 
-func (m *mockKeyRateLimiter) CheckKeyDomainRateLimit(_ context.Context, _, _ string, _ int64, _ time.Duration) (bool, error) {
+func (m *mockKeyRateLimiter) CheckKeyDomainRateLimit(_ context.Context, _, domain string, _ int64, _ time.Duration) (bool, error) {
+	m.lastDomain = domain
 	return m.domainAllowed, m.domainErr
 }
 
@@ -409,5 +411,43 @@ func TestAPIKeyRateLimit_Denied(t *testing.T) {
 
 	if w.Code != http.StatusTooManyRequests {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusTooManyRequests)
+	}
+}
+
+func TestIsDomainAllowed_AllowsChildDomainOfAuthorizedParent(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("GET", "/", nil)
+	c.Set(CtxAPIKeyInfo, &APIKeyInfo{
+		Domains:   []string{"example.com"},
+		DomainSet: map[string]struct{}{"example.com": {}},
+	})
+
+	if !IsDomainAllowed(c, "mail.example.com") {
+		t.Fatal("expected child domain to be allowed")
+	}
+	if IsDomainAllowed(c, "other.com") {
+		t.Fatal("expected unrelated domain to be rejected")
+	}
+}
+
+func TestCheckDomainRateLimit_UsesMostSpecificParentMatch(t *testing.T) {
+	krl := &mockKeyRateLimiter{domainAllowed: true}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest("GET", "/", nil)
+	c.Set(CtxAPIKey, "sk_test")
+	c.Set(CtxAPIKeyInfo, &APIKeyInfo{
+		DomainLimits: map[string]int64{
+			"example.com":     100,
+			"foo.example.com": 50,
+		},
+	})
+
+	if !CheckDomainRateLimit(c, krl, "bar.foo.example.com") {
+		t.Fatal("expected rate limit check to pass")
+	}
+	if krl.lastDomain != "foo.example.com" {
+		t.Fatalf("lastDomain=%q want=%q", krl.lastDomain, "foo.example.com")
 	}
 }

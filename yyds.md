@@ -113,12 +113,13 @@ Authorization: Bearer <temp_token>
 当前实现有两个刻意保留的边界：
 
 1. `mailapi` 没有站内“用户/套餐/支付/Webhook/DNS 自动化”模型，因此只实现公共临时邮箱子集与公共元数据端点。
-2. `POST /v1/accounts/wildcard` 不会自动创建 wildcard 子域的 DNS/MX/SMTP 接收能力。
+2. `mailapi` 不负责自动替你创建 DNS / MX 记录；这些仍需要由域名持有方在外部 DNS 中完成。
 
 这意味着：
 
-- 若传了 `subdomain`，只有当最终子域已经作为活动接收域存在于 `domains` 中时，创建才会成功。
-- 如果你需要“自动创建并接收任意 child-domain”的完整 YYDS wildcard 体验，需要另外扩展 `mailapi` 的域名监听与 DNS 管理能力。
+- 只要父域（例如 `example.com`）已经作为活动接收域配置到 `mailapi`，并且 DNS / MX 泛解析已经把 `*.example.com` 指到当前 SMTP 服务，`POST /v1/accounts/wildcard` 就可以在该父域下动态创建并接收 child-domain 邮箱。
+- 若请求体中提供 `subdomain`，服务端会创建 `subdomain + "." + domain`；若省略 `subdomain`，服务端会自动生成随机 child-domain。
+- SMTP listener 已支持“父域配置覆盖其子域接收”，因此不需要把每一个 child-domain 逐条写入 `domains`。
 
 ---
 

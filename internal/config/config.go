@@ -138,6 +138,7 @@ type SMTPTLSConfig struct {
 // DialectsConfig defines per-dialect settings (optional).
 type DialectsConfig struct {
 	CFWorker CFWorkerDialectConfig `yaml:"cfworker"`
+	YYDS     YYDSDialectConfig     `yaml:"yyds"`
 }
 
 // CFWorkerDialectConfig defines cfworker (cloudflare_temp_email style) settings.
@@ -146,6 +147,113 @@ type CFWorkerDialectConfig struct {
 	Upstream string `yaml:"upstream"`
 	// Timeout is the per-request timeout for proxying to upstream. 0 = no extra timeout.
 	Timeout time.Duration `yaml:"timeout"`
+}
+
+// YYDSDialectConfig defines the optional public metadata exposed by the yyds dialect.
+// 临时邮箱/消息接口本身不依赖这些字段；它们仅用于 `/v1/plans`、`/v1/pricing`、`/v1/domain-reward/config`
+// 与 `/v1/stats` 这类“公开信息端点”。
+type YYDSDialectConfig struct {
+	// PublicBaseURL 可选：用于 `/v1/llms.txt` 中展示公开 Base URL。
+	// 为空时将根据当前请求的 scheme + host 动态推导。
+	PublicBaseURL string `yaml:"publicBaseURL"`
+
+	Plans        []YYDSPlanConfig       `yaml:"plans"`
+	Pricing      YYDSPricingConfig      `yaml:"pricing"`
+	DomainReward YYDSDomainRewardConfig `yaml:"domainReward"`
+	Stats        YYDSStatsConfig        `yaml:"stats"`
+}
+
+type YYDSPlanConfig struct {
+	ID                 string   `yaml:"id" json:"id"`
+	Name               string   `yaml:"name" json:"name"`
+	Description        string   `yaml:"description" json:"description"`
+	PriceMonthly       float64  `yaml:"priceMonthly" json:"priceMonthly"`
+	MaxDomains         int64    `yaml:"maxDomains" json:"maxDomains"`
+	MaxInboxes         int64    `yaml:"maxInboxes" json:"maxInboxes"`
+	MaxAPIKeys         int64    `yaml:"maxApiKeys" json:"maxApiKeys"`
+	MaxSubdomainDepth  int64    `yaml:"maxSubdomainDepth" json:"maxSubdomainDepth"`
+	MaxMessagesPerDay  int64    `yaml:"maxMessagesPerDay" json:"maxMessagesPerDay"`
+	MaxAPICallsDaily   int64    `yaml:"maxApiCallsDaily" json:"maxApiCallsDaily"`
+	MaxAPICallsWeekly  int64    `yaml:"maxApiCallsWeekly" json:"maxApiCallsWeekly"`
+	MaxAPICallsMonthly int64    `yaml:"maxApiCallsMonthly" json:"maxApiCallsMonthly"`
+	MaxWebhooks        int64    `yaml:"maxWebhooks" json:"maxWebhooks"`
+	MaxWildcardRules   int64    `yaml:"maxWildcardRules" json:"maxWildcardRules"`
+	RetentionDays      int64    `yaml:"retentionDays" json:"retentionDays"`
+	MaxAttachmentBytes int64    `yaml:"maxAttachmentBytes" json:"maxAttachmentBytes"`
+	StorageBytes       int64    `yaml:"storageBytes" json:"storageBytes"`
+	MaxRPS             int64    `yaml:"maxRps" json:"maxRps"`
+	Features           []string `yaml:"features" json:"features"`
+	SortOrder          int64    `yaml:"sortOrder" json:"sortOrder"`
+	IsActive           bool     `yaml:"isActive" json:"isActive"`
+}
+
+type YYDSPricingConfig struct {
+	Currency   YYDSPricingCurrencyConfig    `yaml:"currency" json:"currency"`
+	Packages   []YYDSPricingPackageConfig   `yaml:"packages" json:"packages"`
+	RateLimits []YYDSPricingRateLimitConfig `yaml:"rateLimits" json:"rateLimits"`
+}
+
+type YYDSPricingCurrencyConfig struct {
+	Code   string `yaml:"code" json:"code"`
+	Suffix string `yaml:"suffix" json:"suffix"`
+	Symbol string `yaml:"symbol" json:"symbol"`
+}
+
+type YYDSPricingPackageConfig struct {
+	Quantity   int64 `yaml:"quantity" json:"quantity"`
+	PriceCents int64 `yaml:"priceCents" json:"priceCents"`
+}
+
+type YYDSPricingRateLimitConfig struct {
+	Tier        string `yaml:"tier" json:"tier"`
+	DisplayName string `yaml:"displayName" json:"displayName"`
+	MaxDaily    int64  `yaml:"maxDaily" json:"maxDaily"`
+	RPS         int64  `yaml:"rps" json:"rps"`
+	Burst       int64  `yaml:"burst" json:"burst"`
+}
+
+type YYDSDomainRewardConfig struct {
+	CreditExpireDays int64 `yaml:"creditExpireDays" json:"creditExpireDays"`
+	CreditsPerCycle  int64 `yaml:"creditsPerCycle" json:"creditsPerCycle"`
+	RunHour          int64 `yaml:"runHour" json:"runHour"`
+	UsagePerCredit   int64 `yaml:"usagePerCredit" json:"usagePerCredit"`
+}
+
+type YYDSStatsConfig struct {
+	TotalUsers              int64                  `yaml:"totalUsers" json:"totalUsers"`
+	TotalDomains            int64                  `yaml:"totalDomains" json:"totalDomains"`
+	VerifiedDomains         int64                  `yaml:"verifiedDomains" json:"verifiedDomains"`
+	PublicDomains           int64                  `yaml:"publicDomains" json:"publicDomains"`
+	TotalInboxes            int64                  `yaml:"totalInboxes" json:"totalInboxes"`
+	AnonInboxes             int64                  `yaml:"anonInboxes" json:"anonInboxes"`
+	TotalStoredMessages     int64                  `yaml:"totalStoredMessages" json:"totalStoredMessages"`
+	TotalHistoricalMessages int64                  `yaml:"totalHistoricalMessages" json:"totalHistoricalMessages"`
+	TotalCreatedInboxes     int64                  `yaml:"totalCreatedInboxes" json:"totalCreatedInboxes"`
+	TotalMessages           int64                  `yaml:"totalMessages" json:"totalMessages"`
+	TodayAPICalls           int64                  `yaml:"todayApiCalls" json:"todayApiCalls"`
+	TopDomains              []YYDSTopDomainConfig  `yaml:"topDomains" json:"topDomains"`
+	HourlyActivity          []YYDSHourlyStatConfig `yaml:"hourlyActivity" json:"hourlyActivity"`
+	DailyTrend              []YYDSDailyTrendConfig `yaml:"dailyTrend" json:"dailyTrend"`
+}
+
+type YYDSTopDomainConfig struct {
+	Domain     string `yaml:"domain" json:"domain"`
+	IsVerified bool   `yaml:"isVerified" json:"isVerified"`
+	UsageToday int64  `yaml:"usageToday" json:"usageToday"`
+	UsageTotal int64  `yaml:"usageTotal" json:"usageTotal"`
+}
+
+type YYDSHourlyStatConfig struct {
+	Hour     string `yaml:"hour" json:"hour"`
+	Inboxes  int64  `yaml:"inboxes" json:"inboxes"`
+	APICalls int64  `yaml:"apiCalls" json:"apiCalls"`
+}
+
+type YYDSDailyTrendConfig struct {
+	Date     string `yaml:"date" json:"date"`
+	Inboxes  int64  `yaml:"inboxes" json:"inboxes"`
+	APICalls int64  `yaml:"apiCalls" json:"apiCalls"`
+	Users    int64  `yaml:"users" json:"users"`
 }
 
 type MongoDBConfig struct {
@@ -279,6 +387,22 @@ func Load(path string) (*Config, error) {
 			CFWorker: CFWorkerDialectConfig{
 				Upstream: "",
 				Timeout:  15 * time.Second,
+			},
+			YYDS: YYDSDialectConfig{
+				Plans: []YYDSPlanConfig{},
+				Pricing: YYDSPricingConfig{
+					Currency: YYDSPricingCurrencyConfig{
+						Code:   "CNY",
+						Symbol: "¥",
+					},
+					Packages:   []YYDSPricingPackageConfig{},
+					RateLimits: []YYDSPricingRateLimitConfig{},
+				},
+				Stats: YYDSStatsConfig{
+					TopDomains:     []YYDSTopDomainConfig{},
+					HourlyActivity: []YYDSHourlyStatConfig{},
+					DailyTrend:     []YYDSDailyTrendConfig{},
+				},
 			},
 		},
 		MongoDB: MongoDBConfig{

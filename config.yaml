@@ -66,11 +66,12 @@ server:
     # 为空表示不覆盖 Gin 默认行为（保持向后兼容）。示例：
     #trustedProxies: ["127.0.0.1", "10.0.0.0/8"]
     # 多 API 风格（dialect）路由：通过 `<dialect>.<baseHost>` 的子域前缀选择不同 API 兼容层。
-    # 例如：`cfworker.api.mailapi.com` 使用 cfworker 风格；`duck.api.mailapi.com` 使用 duck 风格。
+    # 例如：`cfworker.api.mailapi.com` 使用 cfworker 风格；`duck.api.mailapi.com` 使用 duck 风格；
+    # `yyds.api.mailapi.com` 使用 YYDS Mail 公共临时邮箱风格。
     # baseHost 为空表示禁用（保持向后兼容：所有请求使用单一默认风格）。
     #baseHost: "api.mailapi.com"
     #defaultDialect: "duck"      # api.mailapi.com 与 localhost/IP 访问时采用的默认风格
-    #enabledDialects: ["duck", "cfworker"] # 为空表示不限制（允许所有已注册 dialect）
+    #enabledDialects: ["duck", "cfworker", "yyds"] # 为空表示不限制（允许所有已注册 dialect）
     #unknownDialect: "reject"    # reject(推荐) 或 fallback（未知 dialect 回退到默认）
     # bcrypt 并发闸门：创建账号/登录会触发 bcrypt（CPU 密集），高并发时建议限制并发避免 CPU 打满导致整体雪崩
     maxConcurrentBcrypt: 0 # 0=自动（按 GOMAXPROCS）；建议 4/8/16 视机器与压测结果调整
@@ -125,6 +126,8 @@ server:
 #
 # 注意：这里不是“如何选择 dialect”（那在 server.api.baseHost 下配置），而是每个 dialect 自己的参数。
 # 未配置 cfworker.upstream 时，访问 `cfworker.<baseHost>` 将返回 503（表示上游未就绪）。
+# yyds 的临时邮箱/消息接口不依赖额外配置；下面的 yyds 配置仅用于公开元数据端点
+# （如 `/v1/plans`、`/v1/pricing`、`/v1/domain-reward/config`、`/v1/stats` 与 `/v1/llms.txt`）。
 # -----------------------------------------------------------------------------
 dialects:
   cfworker:
@@ -132,6 +135,38 @@ dialects:
     upstream: ""
     # 代理超时（包含请求与响应体传输）；0 表示不额外设置（仅受请求 ctx 影响）
     timeout: 15s
+  yyds:
+    # 可选：覆盖 `/v1/llms.txt` 中展示的公开 Base URL。为空时将根据当前请求自动推导。
+    publicBaseURL: ""
+    # 下面几个端点的数据均为“运营侧公开元数据”，不影响临时邮箱/消息功能本身：
+    plans: []
+    pricing:
+      currency:
+        code: "CNY"
+        suffix: ""
+        symbol: "¥"
+      packages: []
+      rateLimits: []
+    domainReward:
+      creditExpireDays: 0
+      creditsPerCycle: 0
+      runHour: 0
+      usagePerCredit: 0
+    stats:
+      totalUsers: 0
+      totalDomains: 0
+      verifiedDomains: 0
+      publicDomains: 0
+      totalInboxes: 0
+      anonInboxes: 0
+      totalStoredMessages: 0
+      totalHistoricalMessages: 0
+      totalCreatedInboxes: 0
+      totalMessages: 0
+      todayApiCalls: 0
+      topDomains: []
+      hourlyActivity: []
+      dailyTrend: []
 
 # -----------------------------------------------------------------------------
 # Infrastructure

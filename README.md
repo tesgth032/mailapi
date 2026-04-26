@@ -8,6 +8,8 @@
 
 A temporary email backend service benchmarked against [mail.tm](https://mail.tm), compatible with the [DuckMail](https://www.duckmail.sbs/zh/api-docs) API standard. Built with a microservices architecture and event-driven design. Three independent services (API / SMTP / Worker) work in concert, supporting multi-domain configuration, multi-IP binding, multi-server distributed deployment, API key authentication (default `sk_`, `dk_` also accepted for compatibility), three-layer rate limiting, and human-like email prefix generation.
 
+额外支持多种按子域切换的 API dialect，包括 `duck`、`cfworker` 与 `yyds`。其中 `yyds` 对齐 YYDS Mail 的公共临时邮箱 `/v1` 风格。
+
 ## 架构概览 / Architecture Overview
 
 ```
@@ -442,6 +444,7 @@ go test -v ./...        # 详细输出 / Verbose
 - [USAGE_GUIDE.md](USAGE_GUIDE.md) — 使用指南（中英双语）/ Usage guide (bilingual)
 - [API_DIALECTS.md](API_DIALECTS.md) — 多 API 风格（按子域前缀）规范 / API dialect routing by subdomain
 - [cfworker.md](cfworker.md) — Cloudflare Worker 对接方案 / Cloudflare Worker integration plan
+- [yyds.md](yyds.md) — YYDS Mail 公共临时邮箱 dialect 说明 / YYDS Mail public temporary-inbox dialect
 
 ## License
 

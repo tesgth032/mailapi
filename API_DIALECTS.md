@@ -4,6 +4,7 @@
 
 - `duck`：DuckMail / mail.tm 风格（当前 `mailapi` 的主风格）
 - `cfworker`：`cloudflare_temp_email`（Cloudflare Worker）风格
+- `yyds`：YYDS Mail 公共临时邮箱风格（`/v1` 路径、`X-API-Key`/Bearer、`success/data` 包裹）
 
 为避免“同一套服务端口上堆叠多套路径前缀”带来的复杂度与冲突，建议采用 **按 Hostname 子域前缀选择 API 风格（dialect）** 的全局机制。
 
@@ -30,6 +31,7 @@
 
 - `cfworker.api.mailapi.com`：cfworker 格式（Cloudflare Worker 风格）
 - `duck.api.mailapi.com`：duckmail 格式（DuckMail 风格）
+- `yyds.api.mailapi.com`：YYDS Mail 公共临时邮箱格式
 - `api.mailapi.com`：默认格式（由配置决定，建议默认 `duck` 以保持向后兼容）
 
 实现要点（面向服务端）：
@@ -60,6 +62,7 @@
 
 - `duck`：以 [USAGE_GUIDE.md](USAGE_GUIDE.md) 与 [PROJECT_DOCUMENTATION.md](PROJECT_DOCUMENTATION.md) 为主文档。
 - `cfworker`：以 [cfworker.md](cfworker.md) 为集成方案文档，并以 `cloudflare_temp_email` 上游文档为准。
+- `yyds`：以 [yyds.md](yyds.md) 为主文档。当前实现覆盖 YYDS Mail 文档中的“公共临时邮箱 + 公共元数据”子集，不包含其控制台/计费/Webhook/DNS 自动化等站内产品功能。
 
 ---
 
@@ -87,6 +90,7 @@ server:
     enabledDialects:
       - "duck"
       - "cfworker"
+      - "yyds"
 
     # 未知 dialect 处理：reject（推荐）或 fallback
     unknownDialect: "reject"

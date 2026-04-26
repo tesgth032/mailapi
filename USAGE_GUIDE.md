@@ -100,6 +100,7 @@ MailAPI 支持通过 API 域名前缀（子域）区分不同的 API 风格（�
 - `https://api.mailapi.com`：默认风格（可配置）
 - `https://duck.api.mailapi.com`：DuckMail 风格
 - `https://cfworker.api.mailapi.com`：Cloudflare Worker（cloudflare_temp_email）风格
+- `https://yyds.api.mailapi.com`：YYDS Mail 公共临时邮箱风格
 
 注意：`cfworker` 风格在当前实现中是“代理转发”到你部署的 Cloudflare Worker，上游地址需要在 `config.yaml` 中配置：
 
@@ -111,6 +112,19 @@ dialects:
 ```
 
 未配置 `dialects.cfworker.upstream` 时，访问 `cfworker.<baseHost>` 将返回 503（表示上游未就绪）。
+
+`yyds` 风格不依赖额外上游；它直接复用本地 `mailapi` 的邮箱/消息存储能力，并把接口转换为 YYDS Mail 的 `/v1` 风格。支持的范围包括：
+
+- 公共临时邮箱接口：`/v1/accounts*`、`/v1/token`
+- 邮件接口：`/v1/messages*`、`/v1/sources/{id}`
+- 公共元数据接口：`/v1/domains`、`/v1/plans`、`/v1/pricing`、`/v1/domain-reward/config`、`/v1/stats`、`/v1/llms.txt`
+
+补充说明：
+
+- `yyds` 当前实现的是 YYDS Mail 文档中的“公共临时邮箱/公共元数据”子集；其站内控制台、计费、Webhook、DNS 自动化等功能不在本仓库内实现。
+- `/v1/accounts/wildcard` 仅支持“目标子域已预先配置为接收域名”的场景；`mailapi` 不会自动创建 wildcard 子域的 DNS/MX/SMTP 接收能力。
+
+完整说明见：[yyds.md](yyds.md)。
 
 生产部署时建议同时配置：
 

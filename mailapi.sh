@@ -538,7 +538,7 @@ Environment (config, non-interactive):
   MAILAPI_ENABLE_DIALECTS       y/yes/1 to enable dialect routing
   MAILAPI_BASE_HOST             baseHost when dialects enabled (default: api.<first domain>)
   MAILAPI_DEFAULT_DIALECT       defaultDialect (default: duck)
-  MAILAPI_ENABLED_DIALECTS      enabledDialects CSV (default: duck,cfworker)
+  MAILAPI_ENABLED_DIALECTS      enabledDialects CSV (default: duck,cfworker,yyds)
   MAILAPI_UNKNOWN_DIALECT       unknownDialect (reject|fallback; default: reject)
   MAILAPI_KEY_PREFIX            Default prefix for genkey (sk or dk)
 
@@ -1034,12 +1034,12 @@ do_config() {
 
     local base_host=""
     local default_dialect="duck"
-    local enabled_dialects_csv="duck,cfworker"
+    local enabled_dialects_csv="duck,cfworker,yyds"
     local unknown_dialect="reject"
     if [[ "$enable_dialects" == "y" ]]; then
         local base_host_default="${MAILAPI_BASE_HOST:-api.${domains[0]}}"
         local default_dialect_default="${MAILAPI_DEFAULT_DIALECT:-duck}"
-        local enabled_dialects_csv_default="${MAILAPI_ENABLED_DIALECTS:-duck,cfworker}"
+        local enabled_dialects_csv_default="${MAILAPI_ENABLED_DIALECTS:-duck,cfworker,yyds}"
         local unknown_dialect_default="${MAILAPI_UNKNOWN_DIALECT:-reject}"
 
         base_host="$(read_default "API baseHost [${base_host_default}]: " "$base_host_default")"
@@ -1149,7 +1149,7 @@ EOF
     # 多 API 风格（dialect）路由：通过 \`<dialect>.<baseHost>\` 的子域前缀选择不同 API 兼容层。
     #baseHost: "api.mailapi.com"
     #defaultDialect: "duck"
-    #enabledDialects: ["duck", "cfworker"]
+    #enabledDialects: ["duck", "cfworker", "yyds"]
     #unknownDialect: "reject"
 EOF
         fi
@@ -1220,6 +1220,36 @@ dialects:
   cfworker:
     upstream: "$cfworker_upstream"
     timeout: 15s
+  yyds:
+    publicBaseURL: ""
+    plans: []
+    pricing:
+      currency:
+        code: "CNY"
+        suffix: ""
+        symbol: "¥"
+      packages: []
+      rateLimits: []
+    domainReward:
+      creditExpireDays: 0
+      creditsPerCycle: 0
+      runHour: 0
+      usagePerCredit: 0
+    stats:
+      totalUsers: 0
+      totalDomains: 0
+      verifiedDomains: 0
+      publicDomains: 0
+      totalInboxes: 0
+      anonInboxes: 0
+      totalStoredMessages: 0
+      totalHistoricalMessages: 0
+      totalCreatedInboxes: 0
+      totalMessages: 0
+      todayApiCalls: 0
+      topDomains: []
+      hourlyActivity: []
+      dailyTrend: []
 
 jwt:
   secret: "$jwt_secret"

@@ -20,6 +20,7 @@ import (
 	"mailapi/internal/debugserver"
 	"mailapi/internal/dialect"
 	"mailapi/internal/dialect/cfworker"
+	"mailapi/internal/dialect/yyds"
 	"mailapi/internal/handler"
 	"mailapi/internal/health"
 	"mailapi/internal/middleware"
@@ -261,6 +262,21 @@ func main() {
 		d.Register("cfworker", cfworker.NewProxy(cfworker.Config{
 			Upstream: cfg.Dialects.CFWorker.Upstream,
 			Timeout:  cfg.Dialects.CFWorker.Timeout,
+		}))
+		d.Register("yyds", yyds.New(yyds.Config{
+			Core:           h,
+			Store:          st,
+			Cache:          ca,
+			Storage:        sg,
+			Auth:           au,
+			AccountTTL:     cfg.Account.TTL,
+			TokenTTL:       cfg.JWT.Expiry,
+			APIKeys:        apiKeys,
+			Prefix:         pg,
+			GlobalRPM:      cfg.RateLimit.Global,
+			TrustedProxies: cfg.Server.API.TrustedProxies,
+			AccessLog:      cfg.Server.API.AccessLog,
+			Public:         cfg.Dialects.YYDS,
 		}))
 		rootHandler = d
 	}

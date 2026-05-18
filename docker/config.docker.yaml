@@ -1,0 +1,137 @@
+# Docker Compose 本地示例配置。
+# 仅用于快速体验；生产环境必须替换 API Key、JWT secret、MinIO 凭据和域名。
+
+domains:
+  - domain: "example.com"
+    isActive: true
+    isPrivate: false
+    ips: []
+
+apiKeys:
+  - key: "sk_change_me_to_a_random_key"
+    name: "Admin"
+    domains: ["*"]
+    rpmLimit: 0
+
+rateLimit:
+  global: 100
+
+server:
+  api:
+    host: "0.0.0.0"
+    port: 8080
+    trustedProxies: []
+    maxConcurrentBcrypt: 0
+    accessLog:
+      enabled: true
+      sampleEvery: 100
+      slowThreshold: 500ms
+      errorsOnly: false
+    debug:
+      enabled: true
+      host: "127.0.0.1"
+      port: 6060
+      metrics: true
+      pprof: false
+  smtp:
+    host: "0.0.0.0"
+    port: 25
+    domain: "mail.example.com"
+    maxMessageBytes: 20971520
+    maxRecipients: 50
+    readTimeout: 60s
+    writeTimeout: 60s
+    tls:
+      enabled: false
+      certFile: ""
+      keyFile: ""
+      requireTLS: false
+      minVersion: "1.2"
+    debug:
+      enabled: true
+      host: "127.0.0.1"
+      port: 6061
+      metrics: true
+      pprof: false
+  worker:
+    debug:
+      enabled: true
+      host: "127.0.0.1"
+      port: 6062
+      metrics: true
+      pprof: false
+
+dialects:
+  cfworker:
+    upstream: ""
+    timeout: 15s
+  yyds:
+    publicBaseURL: ""
+    plans: []
+    pricing:
+      currency:
+        code: "CNY"
+        suffix: ""
+        symbol: "¥"
+      packages: []
+      rateLimits: []
+    domainReward:
+      creditExpireDays: 0
+      creditsPerCycle: 0
+      runHour: 0
+      usagePerCredit: 0
+    stats:
+      totalUsers: 0
+      totalDomains: 0
+      verifiedDomains: 0
+      publicDomains: 0
+      totalInboxes: 0
+      anonInboxes: 0
+      totalStoredMessages: 0
+      totalHistoricalMessages: 0
+      totalCreatedInboxes: 0
+      totalMessages: 0
+      todayApiCalls: 0
+      topDomains: []
+      hourlyActivity: []
+      dailyTrend: []
+
+mongodb:
+  uri: "mongodb://mongodb:27017"
+  database: "mailapi"
+  maxPoolSize: 0
+  minPoolSize: -1
+  maxConnecting: 0
+  connectTimeout: 10s
+  serverSelectionTimeout: 10s
+  maxConnIdleTime: 5m
+  appName: "mailapi"
+
+redis:
+  addr: "redis:6379"
+  password: ""
+  db: 0
+
+nats:
+  url: "nats://nats:4222"
+  stream: "EMAILS"
+  subject: "emails.incoming"
+  consumerAckWait: 30s
+  consumerMaxDeliver: 3
+
+minio:
+  endpoint: "minio:9000"
+  accessKey: "mailapi"
+  secretKey: "mailapi-local-secret"
+  bucket: "attachments"
+  useSSL: false
+
+jwt:
+  secret: "change-me-to-a-random-secret"
+  expiry: 1h
+
+account:
+  ttl: 168h
+
+message:
+  ttl: 168h

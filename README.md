@@ -68,6 +68,85 @@
 - Docker 与 Docker Compose，用于快速启动 MongoDB、Redis、NATS、MinIO。
 - Linux 生产环境建议使用 systemd；SMTP 监听 25 端口需要 root、`CAP_NET_BIND_SERVICE` 或端口转发。
 
+### Docker Compose 快速启动
+
+仓库提供 `compose.yaml`，会同时启动 MongoDB、Redis、NATS、MinIO、API、SMTP、Worker。默认配置文件为 `docker/config.docker.yaml`，只适合本地体验，生产环境务必替换密钥和域名。
+
+```bash
+# 使用本地 Dockerfile 构建并启动全部服务
+docker compose up -d --build
+
+# 查看服务状态
+docker compose ps
+
+# 查看日志
+docker compose logs -f api worker smtp
+
+# 停止服务
+docker compose down
+```
+
+默认访问地址：
+
+| 服务 | 地址 |
+| --- | --- |
+| API | `http://127.0.0.1:8080` |
+| SMTP | `0.0.0.0:25` |
+| MinIO API | `http://127.0.0.1:9000` |
+| MinIO Console | `http://127.0.0.1:9001` |
+
+Debug server 按项目安全约束只绑定容器内部 loopback，默认不发布到宿主机；Compose healthcheck 会在容器内部访问 `/healthz`。
+
+可复制 `docker/env.example` 为 `.env` 覆盖端口绑定、镜像名和本地 MinIO 凭据：
+
+```bash
+cp docker/env.example .env
+docker compose up -d --build
+```
+
+只启动部分服务也可以直接指定服务名。Compose 会自动带起 `depends_on` 中的基础设施：
+
+```bash
+docker compose up -d api worker
+docker compose up -d smtp
+```
+
+### 使用已发布镜像
+
+CD 会将镜像发布到 GitHub Container Registry：
+
+```text
+ghcr.io/tesgth032/mailapi:latest
+ghcr.io/tesgth032/mailapi:main
+ghcr.io/tesgth032/mailapi:<tag>
+ghcr.io/tesgth032/mailapi:sha-<commit>
+```
+
+如果不想在目标机器构建镜像，可以直接拉取 GHCR 镜像：
+
+```bash
+MAILAPI_IMAGE=ghcr.io/tesgth032/mailapi:latest docker compose up -d
+```
+
+如果依赖服务由外部托管，只想分别部署 API、SMTP、Worker，可使用 `compose.app.yaml` 并挂载自己的生产配置：
+
+```bash
+MAILAPI_CONFIG_FILE=/opt/mailapi/config.yaml \
+MAILAPI_IMAGE=ghcr.io/tesgth032/mailapi:latest \
+docker compose -f compose.app.yaml up -d api worker
+
+MAILAPI_CONFIG_FILE=/opt/mailapi/config.yaml \
+docker compose -f compose.app.yaml up -d smtp
+```
+
+单镜像内包含三个二进制，通过 command 选择服务：
+
+```bash
+docker run --rm -v "$PWD/docker/config.docker.yaml:/etc/mailapi/config.yaml:ro" ghcr.io/tesgth032/mailapi:latest api --check-config
+docker run --rm -v "$PWD/docker/config.docker.yaml:/etc/mailapi/config.yaml:ro" ghcr.io/tesgth032/mailapi:latest smtp --check-config
+docker run --rm -v "$PWD/docker/config.docker.yaml:/etc/mailapi/config.yaml:ro" ghcr.io/tesgth032/mailapi:latest worker --check-config
+```
+
 ### 使用管理脚本
 
 ```bash
@@ -348,6 +427,23 @@ server:
 | `MAILAPI_SMOKE_URL` | 冒烟测试 API 地址 |
 | `MAILAPI_SMOKE_HOST` | 冒烟测试 Host 头 |
 
+## GitHub Actions
+
+仓库内置两条工作流：
+
+- `.github/workflows/ci.yml`：在 push、pull request 和手动触发时运行 `go test ./...`、构建三个二进制，并构建 Docker 镜像验证入口脚本和配置检查命令。
+- `.github/workflows/docker.yml`：在 `main`、`v*.*.*` tag 和手动触发时构建 `linux/amd64`、`linux/arm64` 多架构镜像并推送到 GHCR。
+
+发布规则：
+
+| 触发 | 镜像标签 |
+| --- | --- |
+| push 到 `main` | `latest`、`main`、`sha-<commit>` |
+| push tag `v1.2.3` | `v1.2.3`、`1.2.3`、`1.2`、`sha-<commit>` |
+| 手动触发 | 当前 ref 对应标签 |
+
+工作流使用 `GITHUB_TOKEN` 写入 GHCR，不需要额外配置 Docker Hub 密钥。若 GHCR package 未自动公开，可在 GitHub Packages 页面将 package visibility 改为 public。
+
 ## 测试
 
 ```bash
@@ -403,6 +499,10 @@ go test -cover ./...
 ├── cfworker.md
 ├── yyds.md
 ├── openapi.yaml
+├── Dockerfile
+├── compose.yaml
+├── compose.app.yaml
+├── docker/
 ├── config.yaml
 ├── mailapi.sh
 └── go.mod
